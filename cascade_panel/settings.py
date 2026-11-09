@@ -64,7 +64,15 @@ def web_dist() -> Path:
 
 
 def agent_binary() -> Path:
+    """Linux-бинарник агента, который панель заливает на вход по SSH.
+
+    В собранном exe он лежит рядом с распакованными данными PyInstaller,
+    а не как программа Windows.
+    """
     env = os.environ.get("CASCADE_AGENT_BIN")
     if env:
         return Path(env)
+    bundled = getattr(sys, "_MEIPASS", None)
+    if bundled:
+        return Path(bundled) / "agent" / "cascade-agent"
     return Path(__file__).resolve().parent.parent / "agent" / "dist" / "cascade-agent"

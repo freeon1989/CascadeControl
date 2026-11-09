@@ -38,13 +38,16 @@ npm --prefix web run dev   # http://127.0.0.1:47124, API проксируетс�
 
 ## Windows
 
-На машине с Python, Node и [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/):
+Готовый каталог для компьютера владельца собирается на Linux через Wine и официальный CPython amd64:
 
-```powershell
-./scripts/build_windows.ps1
+```bash
+./scripts/setup_wine_python.sh
+./scripts/build_windows.sh
 ```
 
-Получится `dist/CascadeControl.exe`. Окно — это pywebview поверх локального сервера. Тот же сценарий выполняет GitHub Actions `windows-exe` и кладёт exe в артефакт.
+Архив `build/CascadeControl-windows-x64.zip` содержит `CascadeControl.exe` (сборка onedir: рядом обязательна папка `_internal`), `README_RU.txt` и linux/amd64 бинарник агента. Базы и ключей в архиве нет. Первый запуск создаёт учебную схему и помечает её как демо; ключи генерируются уже на том компьютере.
+
+На самой Windows, если стоят Python, Node, Go и WebView2, тот же результат даёт `./scripts/build_windows.ps1`. GitHub Actions `windows-exe` повторяет этот сценарий. Окно панели — pywebview поверх локального сервера. Если окно не открылось, адрес остаётся в консоли: `http://127.0.0.1:47123`.
 
 ## Что умеет эта версия
 

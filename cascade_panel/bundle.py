@@ -102,16 +102,41 @@ def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool) -> s
         "#!/bin/bash",
         "set -u",
         "log() { echo \"CASCADE_LOG $*\"; }",
-        "if [ \"$(id -u)\" -ne 0 ]; then SUDO=sudo; else SUDO=; fi",
+        "if [ \"$(id -u)\" -ne 0 ]; then SUDO=\"sudo -n\"; else SUDO=; fi",
         "log подготовка каталогов",
         "$SUDO mkdir -p /opt/cascade/awg /opt/cascade/xray /opt/cascade/bin /etc/cascade-agent /var/lib/cascade-agent",
         "$SUDO chown -R \"$USER\" /opt/cascade /etc/cascade-agent /var/lib/cascade-agent || true",
-        "if ! command -v docker >/dev/null 2>&1; then",
-        "  log ставлю docker из репозитория ОС",
-        "  $SUDO apt-get update -y",
-        "  $SUDO apt-get install -y docker.io nftables curl ca-certificates unzip",
+        "if command -v apt-get >/dev/null 2>&1; then",
+        "  log пакеты Ubuntu/Debian через apt",
+        "  $SUDO apt-get update -y || true",
+        "  $SUDO apt-get install -y nftables curl ca-certificates unzip || true",
+        "  if ! command -v docker >/dev/null 2>&1; then",
+        "    log ставлю docker: пакет docker.io, если его нет то get.docker.com",
+        "    if ! $SUDO apt-get install -y docker.io; then",
+        "      log пакет docker.io не встал, пробую get.docker.com",
+        "      if ! curl -fsSL https://get.docker.com | $SUDO sh; then",
+        "        log get.docker.com не подошёл, повторно ставлю docker.io",
+        "        $SUDO apt-get install -y docker.io || true",
+        "      fi",
+        "    fi",
+        "  fi",
+        "elif command -v dnf >/dev/null 2>&1; then",
+        "  log пакеты Alma/Rocky/CentOS/Fedora через dnf",
+        "  $SUDO dnf install -y nftables curl ca-certificates unzip || true",
+        "  if command -v firewall-cmd >/dev/null 2>&1; then",
+        "    log firewalld найден и не отключается, таблица nft inet cascade живёт рядом",
+        "  fi",
+        "  if ! command -v docker >/dev/null 2>&1; then",
+        "    log ставлю docker: пакет dnf, если его нет то get.docker.com",
+        "    if ! $SUDO dnf install -y docker docker-cli; then",
+        "      if ! curl -fsSL https://get.docker.com | $SUDO sh; then",
+        "        log get.docker.com не подошёл, пробую moby-engine и docker-ce",
+        "        $SUDO dnf install -y moby-engine || $SUDO dnf install -y docker-ce docker-ce-cli containerd.io || true",
+        "      fi",
+        "    fi",
+        "  fi",
         "else",
-        "  $SUDO apt-get install -y nftables curl ca-certificates unzip >/dev/null",
+        "  log нет apt-get и dnf, пакеты нужно поставить вручную",
         "fi",
         "$SUDO systemctl enable --now docker >/dev/null 2>&1 || true",
     ]
@@ -178,7 +203,7 @@ def render_remove_script() -> str:
     return f"""#!/bin/bash
 set -u
 log() {{ echo "CASCADE_LOG $*"; }}
-if [ "$(id -u)" -ne 0 ]; then SUDO=sudo; else SUDO=; fi
+if [ "$(id -u)" -ne 0 ]; then SUDO="sudo -n"; else SUDO=; fi
 log останавливаю только контейнеры cascade-*
 if $SUDO docker ps -a --format '{{{{.Names}}}}' | grep -qx {shlex.quote(name)}; then
   $SUDO docker rm -f {shlex.quote(name)}

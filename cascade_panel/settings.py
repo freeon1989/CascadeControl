@@ -20,13 +20,16 @@ CLIENT_IP_START = 2
 
 MIN_DISK_GB = 2.0
 WARN_DISK_GB = 10.0
+# Ядро 5.4 и новее проходит без замечаний. 4.18 (Alma/Rocky 8) — предупреждение.
+# Ниже 4.18 установка блокируется.
 MIN_KERNEL = (5, 4)
+KERNEL_WARN = (4, 18)
 
-ALLOWED_OS = {
-    ("ubuntu", "22.04"),
-    ("ubuntu", "24.04"),
-    ("debian", "12"),
-}
+UBUNTU_KNOWN = {(20, 4), (22, 4), (24, 4), (26, 4)}
+DEBIAN_KNOWN = {11, 12, 13}
+EL_KNOWN = {8, 9}
+CENTOS_STREAM_KNOWN = {9}
+FEDORA_KNOWN = set(range(40, 46))
 
 
 def data_dir() -> Path:

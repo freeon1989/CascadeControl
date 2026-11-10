@@ -37,6 +37,8 @@ from .service import (
     client_view,
     create_client,
     create_server,
+    reconfigure_worker,
+    update_server,
     decide,
     export_client,
     ingest_list_text,
@@ -70,6 +72,18 @@ class ServerIn(BaseModel):
     role: str
     country: str = ""
     link_protocol: str = "vless"
+
+
+class ServerPatch(BaseModel):
+    name: str
+    host: str
+    ssh_port: int = 22
+    ssh_user: str = "root"
+    auth_type: str = "password"
+    secret: str = ""
+    role: str
+    country: str = ""
+    protocols: list[str] | None = None
 
 
 class RoleIn(BaseModel):
@@ -213,6 +227,18 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    @app.patch("/api/servers/{server_id}")
+    def patch_server(server_id: str, body: ServerPatch) -> dict:
+        try:
+            with session() as db:
+                server = db.get(Server, server_id)
+                if server is None:
+                    raise HTTPException(404, "узел не найден")
+                update_server(db, server, body.model_dump())
+                return server_view(server)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
     @app.post("/api/servers/{server_id}/role")
     def post_role(server_id: str, body: RoleIn) -> dict:
         from .service import _guard_role
@@ -250,6 +276,13 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
     @app.post("/api/servers/{server_id}/reinstall")
     def post_reinstall(server_id: str) -> dict:
         return post_install(server_id)
+
+    @app.post("/api/servers/{server_id}/reconfigure")
+    def post_reconfigure(server_id: str) -> dict:
+        with session() as db:
+            if db.get(Server, server_id) is None:
+                raise HTTPException(404, "узел не найден")
+        return {"job_id": start_job("reconfigure", server_id, reconfigure_worker)}
 
     @app.delete("/api/servers/{server_id}")
     def delete_server(server_id: str) -> dict:

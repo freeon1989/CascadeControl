@@ -40,6 +40,8 @@ from .ssh_client import ParamikoSession, SSHError, SSHTarget
 from .vpnuri import build_envelope, build_last_config, encode_vpn_uri
 
 ROLES = {"entry", "standby_entry", "transit", "exit", "standby_exit"}
+ENTRY_ROLES = {"entry", "standby_entry"}
+PROTOCOL_LABELS = {"awg": "AWG 3.1", "vless": "VLESS Reality"}
 _connector = None
 
 
@@ -92,13 +94,45 @@ def _stats(server: Server) -> dict:
         return {}
 
 
+def protocol_ids(server: Server) -> list[str]:
+    raw = (server.protocols_json or "").strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, list) and data:
+            return _normalize_protocols(server.role, data, strict=False)
+    if server.role in ENTRY_ROLES:
+        return ["awg", "vless"]
+    return ["vless"]
+
+
+def _normalize_protocols(role: str, items, strict: bool = True) -> list[str]:
+    chosen: list[str] = []
+    for item in items:
+        key = str(item).strip().lower()
+        if key in {"awg", "awg 3.1", "amneziawg"}:
+            key = "awg"
+        elif key in {"vless", "vless reality", "reality"}:
+            key = "vless"
+        if key in PROTOCOL_LABELS and key not in chosen:
+            chosen.append(key)
+    if "awg" in chosen and role not in ENTRY_ROLES:
+        if strict:
+            raise ValueError("AmneziaWG включается только на входе")
+        chosen = [key for key in chosen if key != "awg"]
+    if not chosen:
+        if strict:
+            raise ValueError("нужен хотя бы один протокол: AWG 3.1 или VLESS Reality")
+        return ["awg", "vless"] if role in ENTRY_ROLES else ["vless"]
+    return chosen
+
+
 def server_view(server: Server) -> dict:
     stats = _stats(server)
-    protocols = []
-    if server.role in {"entry", "standby_entry"}:
-        protocols.append("AWG 3.1")
-    if server.reality_port:
-        protocols.append("VLESS Reality")
+    ids = protocol_ids(server)
+    protocols = [PROTOCOL_LABELS[item] for item in ids]
     return {
         "id": server.id,
         "name": server.name,
@@ -114,6 +148,7 @@ def server_view(server: Server) -> dict:
         "reality_port": server.reality_port,
         "link_protocol": server.link_protocol,
         "protocols": protocols,
+        "protocol_ids": ids,
         "hysteria2": hysteria_plan(),
         "cpu": stats.get("cpu"),
         "ram": stats.get("ram"),
@@ -258,6 +293,68 @@ def create_server(db: Session, payload: dict) -> Server:
     return server
 
 
+def update_server(db: Session, server: Server, payload: dict) -> Server:
+    """Меняет карточку узла и не выпускает ключи заново."""
+    name = (payload.get("name") or "").strip()
+    host = (payload.get("host") or "").strip()
+    if not name or not host:
+        raise ValueError("нужны имя и адрес")
+    role = payload.get("role") or server.role
+    _guard_role(db, role, server.id)
+    auth_type = payload.get("auth_type") or server.auth_type
+    if auth_type not in {"password", "key"}:
+        raise ValueError("тип доступа: password или key")
+    secret = payload.get("secret") or ""
+    if auth_type != server.auth_type and not str(secret).strip():
+        raise ValueError("для нового типа доступа нужен пароль или ключ")
+    port = int(payload.get("ssh_port") or server.ssh_port or 22)
+    if port < 1 or port > 65535:
+        raise ValueError("порт SSH вне диапазона")
+    user = (payload.get("ssh_user") or server.ssh_user or "root").strip()
+    if not user:
+        raise ValueError("нужен пользователь SSH")
+    protocols = payload.get("protocols")
+    if protocols is None:
+        stored = protocol_ids(server)
+        if role != server.role:
+            stored = _normalize_protocols(role, stored, strict=False)
+        server.protocols_json = json.dumps(stored)
+    else:
+        server.protocols_json = json.dumps(_normalize_protocols(role, protocols))
+    server.name = name
+    server.host = host
+    server.ssh_port = port
+    server.ssh_user = user
+    server.auth_type = auth_type
+    server.role = role
+    server.country = str(payload.get("country") or "").upper()[:8]
+    if str(secret).strip():
+        stored_secret = secret if auth_type == "key" else str(secret).strip()
+        server.ssh_secret_enc = _box().encrypt(stored_secret)
+    _ensure_crypto(server)
+    server.config_dirty = True
+    return server
+
+
+def _ensure_crypto(server: Server) -> None:
+    """Дописывает только отсутствующие ключи. Уже выпущенные не меняет."""
+    if not server.reality_private_enc or not server.node_uuid:
+        material = generate_reality(server.reality_port or 443)
+        server.reality_public = material.public_key
+        server.reality_private_enc = _box().encrypt(material.private_key)
+        server.reality_short_enc = _box().encrypt(material.short_id)
+        server.reality_sni = material.sni
+        server.node_uuid = material.uuid
+        server.reality_port = server.reality_port or material.port
+    if server.role in ENTRY_ROLES and not server.awg_private_enc:
+        keys = generate_wg_keypair()
+        params = generate_params()
+        server.awg_public = keys.public_b64
+        server.awg_private_enc = _box().encrypt(keys.private_b64)
+        server.awg_port = server.awg_port or 51820
+        _store_params(server, params)
+
+
 def connect(server: Server):
     if server.demo:
         raise SSHError("это демонстрационный узел, SSH к нему не открывается")
@@ -335,6 +432,7 @@ def precheck_worker(job_id: str, server_id: str | None) -> None:
     with session() as db:
         server = db.get(Server, server_id)
         assert server
+        was_dirty = server.config_dirty
         server.precheck_json = json.dumps(report.to_json(), ensure_ascii=False)
         used = set(report.used_ports)
         if server.role in {"entry", "standby_entry"}:
@@ -344,9 +442,16 @@ def precheck_worker(job_id: str, server_id: str | None) -> None:
         else:
             server.reality_port = pick_port(used, [server.reality_port or 0] if server.reality_port not in used else [], 2053)
         server.config_dirty = True
+    failed = [item for item in report.checks if item.level == "fail"]
+    summary = "; ".join(f"{item.title}: {item.detail}" for item in failed)[:500]
     level = "info" if report.ok else "error"
     _log(job_id, "precheck", "проверка пройдена" if report.ok else "есть блокирующие пункты", level)
-    _finish(job_id, "done" if report.ok else "error", server_id, "" if report.ok else "предпроверка не пройдена")
+    _finish(job_id, "done" if report.ok else "error", server_id, "" if report.ok else summary or "предпроверка не пройдена")
+    if was_dirty:
+        with session() as db:
+            server = db.get(Server, server_id)
+            if server:
+                server.config_dirty = True
 
 
 def assemble(db: Session):
@@ -482,19 +587,23 @@ def files_for(db: Session, server: Server) -> dict[str, str]:
     if plan is None:
         raise ValueError("узел не попал в цепочку")
     files: dict[str, str] = {}
-    if plan.xray is not None:
+    enabled = set(protocol_ids(server))
+    want_xray = plan.xray is not None and "vless" in enabled
+    want_awg = server.role == "entry" and "awg" in enabled
+    if want_xray:
         files["/opt/cascade/xray/config.json"] = xray_document(plan.xray)
         files["/opt/cascade/xray/cascade-xray.service"] = xray_unit()
     if server.role == "entry":
-        files["/opt/cascade/awg/cawg0.conf"] = awg_text
-        files["/opt/cascade/awg/start.sh"] = awg_start_script()
-        files["/opt/cascade/awg/tproxy.nft"] = tproxy_nft()
+        if want_awg:
+            files["/opt/cascade/awg/cawg0.conf"] = awg_text
+            files["/opt/cascade/awg/start.sh"] = awg_start_script()
+            files["/opt/cascade/awg/tproxy.nft"] = tproxy_nft()
         files["/etc/cascade-agent/config.json"] = agent_document(agent)
         files["/opt/cascade/agent/cascade-agent.service"] = agent_unit()
     script = render_install_script(
         role=server.role,
-        awg=server.role == "entry",
-        xray=plan.xray is not None,
+        awg=want_awg,
+        xray=want_xray,
         agent=server.role == "entry",
     )
     files["/opt/cascade/install.sh"] = script
@@ -512,7 +621,9 @@ def install_worker(job_id: str, server_id: str | None) -> None:
         if server.precheck_json:
             report = json.loads(server.precheck_json)
             if not report.get("ok", False) and not server.demo:
-                raise ValueError("установка заблокирована: предпроверка не пройдена")
+                failed = [item for item in report.get("checks") or [] if item.get("level") == "fail"]
+                detail = "; ".join(f"{item.get('title')}: {item.get('detail')}" for item in failed)
+                raise ValueError("установка заблокирована: " + (detail or "предпроверка не пройдена"))
         demo = server.demo
         files = None if demo else files_for(db, server)
         binary = None
@@ -546,6 +657,12 @@ def install_worker(job_id: str, server_id: str | None) -> None:
     if code != 0:
         raise SSHError(f"установка завершилась с кодом {code}")
     _finish(job_id, "done", server_id)
+
+
+def reconfigure_worker(job_id: str, server_id: str | None) -> None:
+    """Заново записывает текущий конфиг. Запись сервера в базе не удаляет."""
+    _log(job_id, "reconfigure", "перенастройка: текущие настройки записываются заново, сервер из списка не удаляется")
+    install_worker(job_id, server_id)
 
 
 def server_role_needs_agent(server_id: str) -> bool:

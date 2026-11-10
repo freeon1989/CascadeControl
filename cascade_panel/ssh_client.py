@@ -40,14 +40,28 @@ class ParamikoSession:
             "look_for_keys": False,
             "banner_timeout": self.timeout,
         }
-        if self.target.auth_type == "key":
-            kwargs["pkey"] = _load_pkey(self.target.secret)
-        else:
-            kwargs["password"] = self.target.secret
+        kwargs["auth_timeout"] = self.timeout
         try:
-            client.connect(**kwargs)
+            if self.target.auth_type == "key":
+                kwargs["pkey"] = _load_pkey(self.target.secret)
+                client.connect(**kwargs)
+            else:
+                client.connect(**kwargs, password=self.target.secret.strip())
         except Exception as exc:  # noqa: BLE001 — наружу уходит короткое сообщение без секрета
-            raise SSHError(f"SSH: не удалось подключиться к {self.target.host}: {exc.__class__.__name__}") from exc
+            auth_failed = exc.__class__.__name__ == "AuthenticationException"
+            if self.target.auth_type != "key" and auth_failed:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    client = _connect_password_interactive(self.target, self.timeout)
+                except Exception as second:  # noqa: BLE001
+                    raise SSHError(
+                        f"SSH: не удалось подключиться к {self.target.host}: {second.__class__.__name__}"
+                    ) from second
+            else:
+                raise SSHError(f"SSH: не удалось подключиться к {self.target.host}: {exc.__class__.__name__}") from exc
         self._client = client
         return self
 
@@ -84,7 +98,11 @@ class ParamikoSession:
         sftp = self._client.open_sftp()
         try:
             parent = path.rsplit("/", 1)[0]
-            self.run(f"sudo mkdir -p {parent} && sudo chown {self.target.user} {parent}", lambda _line: None)
+            prefix = "" if self.target.user == "root" else "sudo -n "
+            self.run(
+                f"{prefix}mkdir -p {parent} && {prefix}chown {self.target.user} {parent}",
+                lambda _line: None,
+            )
             with sftp.file(path, "wb") as remote:
                 remote.write(content)
             sftp.chmod(path, mode)
@@ -100,6 +118,37 @@ class ParamikoSession:
                 return remote.read()
         finally:
             sftp.close()
+
+
+def _connect_password_interactive(target: SSHTarget, timeout: float):
+    """Пароль через keyboard-interactive, если сервер не принимает auth password."""
+    import socket
+
+    import paramiko
+
+    password = target.secret.strip()
+    sock = socket.create_connection((target.host, int(target.port)), timeout)
+    transport = paramiko.Transport(sock)
+    transport.banner_timeout = timeout
+    try:
+        transport.start_client(timeout=timeout)
+
+        def handler(_title, _instructions, prompts):
+            return [password for _prompt in prompts]
+
+        try:
+            transport.auth_password(target.user, password)
+        except paramiko.AuthenticationException:
+            transport.auth_interactive(target.user, handler)
+        if not transport.is_authenticated():
+            raise paramiko.AuthenticationException("password")
+    except Exception:
+        transport.close()
+        raise
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client._transport = transport
+    return client
 
 
 def _load_pkey(secret: str):

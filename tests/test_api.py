@@ -178,9 +178,143 @@ def test_install_and_remove_scripts_refuse_foreign_containers():
     script = render_install_script(role="entry", awg=True, xray=True, agent=True)
     assert "cascade-awg" in script
     assert "amnezia-" not in script
+    assert "docker.io" in script
+    assert "https://get.docker.com" in script
+    assert "dnf install" in script
+    assert "firewall-cmd" in script
+    assert script.index("https://get.docker.com") < script.rindex("docker.io")
     remove = render_remove_script()
     assert "amnezia-" not in remove
     assert "cascade-awg" in remove
+
+
+def test_edit_keeps_keys_recheck_and_reconfigure(client):
+    from cascade_panel.crypto import vault
+    from cascade_panel.db import session
+    from cascade_panel.models import Server
+
+    client.post("/api/settings/clear-demo")
+    created = []
+    for name, role in (("entry-1", "entry"), ("tr-a", "transit"), ("exit-a", "exit")):
+        response = client.post(
+            "/api/servers",
+            json={
+                "name": name,
+                "host": "203.0.113.10",
+                "ssh_port": 22,
+                "ssh_user": "root",
+                "auth_type": "password",
+                "secret": "secret-value\n",
+                "role": role,
+                "country": "de",
+            },
+        )
+        assert response.status_code == 200, response.text
+        created.append(response.json())
+    entry = next(item for item in created if item["role"] == "entry")
+    transit = next(item for item in created if item["role"] == "transit")
+    with session() as db:
+        row = db.get(Server, entry["id"])
+        awg_public = row.awg_public
+        reality_public = row.reality_public
+        assert awg_public and reality_public
+    patched = client.patch(
+        f"/api/servers/{entry['id']}",
+        json={
+            "name": "entry-renamed",
+            "host": "203.0.113.20",
+            "ssh_port": 2222,
+            "ssh_user": "root",
+            "auth_type": "password",
+            "secret": "  newpass \n",
+            "role": "entry",
+            "country": "de",
+            "protocols": ["awg", "vless"],
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["name"] == "entry-renamed"
+    assert body["host"] == "203.0.113.20"
+    assert body["ssh_port"] == 2222
+    assert body["country"] == "DE"
+    assert body["protocol_ids"] == ["awg", "vless"]
+    assert body["config_dirty"] is True
+    with session() as db:
+        row = db.get(Server, entry["id"])
+        assert row.awg_public == awg_public
+        assert row.reality_public == reality_public
+        assert vault().decrypt(row.ssh_secret_enc) == "newpass"
+    denied = client.patch(
+        f"/api/servers/{created[2]['id']}",
+        json={
+            "name": "exit-a",
+            "host": "203.0.113.10",
+            "ssh_port": 22,
+            "ssh_user": "root",
+            "auth_type": "password",
+            "secret": "",
+            "role": "exit",
+            "country": "DE",
+            "protocols": ["awg"],
+        },
+    )
+    assert denied.status_code == 400
+
+    good = {
+        "virt": "kvm",
+        "os_id": "ubuntu",
+        "os_version": "22.04",
+        "os_pretty": "Ubuntu 22.04.5 LTS",
+        "kernel": "5.15.0-119-generic",
+        "disk_free_gb": 18,
+        "docker": True,
+        "port_443_tcp_free": False,
+        "used_ports": [22, 443],
+        "containers": [{"name": "amnezia-awg", "image": "amnezia-awg", "ports": "443/tcp", "status": "Up"}],
+        "uid": 0,
+        "sudo_nopass": True,
+    }
+    state = {"text": "CASCADE_JSON " + json.dumps(good)}
+    holder: dict = {}
+
+    def factory(_server):
+        holder["ssh"] = FakeSession(state["text"])
+        return holder["ssh"]
+
+    set_connector(factory)
+    try:
+        job = client.post(f"/api/servers/{entry['id']}/precheck").json()
+        assert _wait(client, job["job_id"])["status"] == "done"
+        fresh = next(item for item in client.get("/api/servers").json() if item["id"] == entry["id"])
+        assert fresh["precheck"]["ok"] is True
+        assert any(item["id"] == "port443" and item["level"] == "warn" for item in fresh["precheck"]["checks"])
+        assert fresh["config_dirty"] is True
+        job = client.post(f"/api/servers/{entry['id']}/reconfigure").json()
+        done = _wait(client, job["job_id"])
+        assert done["status"] == "done", done
+        joined = "\n".join(line["message"] for line in done["lines"])
+        assert "не удаляется" in joined
+        assert "newpass" not in joined
+        assert "/opt/cascade/install.sh" in holder["ssh"].files
+        still = client.get("/api/servers").json()
+        assert len(still) == 3
+        assert any(item["id"] == entry["id"] and item["name"] == "entry-renamed" for item in still)
+
+        state["text"] = "CASCADE_JSON " + json.dumps({**good, "virt": "openvz"})
+        job = client.post(f"/api/servers/{transit['id']}/precheck").json()
+        failed = _wait(client, job["job_id"])
+        assert failed["status"] == "error"
+        transit_view = next(item for item in client.get("/api/servers").json() if item["id"] == transit["id"])
+        assert "Виртуализация" in transit_view["last_error"]
+        assert transit_view["precheck"]["ok"] is False
+        assert any(item["hint"] for item in transit_view["precheck"]["checks"] if item["level"] == "fail")
+        job = client.post(f"/api/servers/{transit['id']}/reconfigure").json()
+        blocked = _wait(client, job["job_id"])
+        assert blocked["status"] == "error"
+        assert any(item["id"] == transit["id"] for item in client.get("/api/servers").json())
+    finally:
+        set_connector(None)
 
 
 def test_reissue_changes_client_key(client):

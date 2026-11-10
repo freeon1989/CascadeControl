@@ -39,6 +39,7 @@ export type Server = {
   reality_port: number | null;
   link_protocol: string;
   protocols: string[];
+  protocol_ids: string[];
   hysteria2: { enabled: boolean; reason: string };
   cpu: number | null;
   ram: string | null;
@@ -51,7 +52,7 @@ export type Server = {
   precheck: { ok: boolean; checks: Check[] } | null;
 };
 
-export type Check = { id: string; title: string; ok: boolean; level: string; detail: string };
+export type Check = { id: string; title: string; ok: boolean; level: string; detail: string; hint?: string };
 
 export type Client = {
   id: string;

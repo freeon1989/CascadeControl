@@ -33,6 +33,7 @@ class Server(Base):
     awg_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reality_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     link_protocol: Mapped[str] = mapped_column(String(16), default="vless")
+    protocols_json: Mapped[str] = mapped_column(Text, default="")
     awg_public: Mapped[str] = mapped_column(Text, default="")
     awg_private_enc: Mapped[str] = mapped_column(Text, default="")
     awg_params_json: Mapped[str] = mapped_column(Text, default="")

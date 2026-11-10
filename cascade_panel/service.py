@@ -298,8 +298,23 @@ def _issue_node_crypto(server: Server) -> None:
         params = generate_params()
         server.awg_public = keys.public_b64
         server.awg_private_enc = _box().encrypt(keys.private_b64)
-        server.awg_port = server.awg_port or 51820
         _store_params(server, params)
+
+
+def choose_awg_port(current: int | None, used: set[int]) -> int:
+    """Уже записанный порт не двигаем: после установки его же слушает awg, и ss не повод уводить клиентов на 40000."""
+    if current and 1 <= int(current) <= 65535:
+        return int(current)
+    if 51820 not in used:
+        return 51820
+    return pick_port(set(used), [], 40000)
+
+
+def entry_awg_port(server: Server) -> int:
+    """Один и тот же номер для ListenPort на входе и Endpoint в конфиге клиента."""
+    port = choose_awg_port(server.awg_port, set())
+    server.awg_port = port
+    return port
 
 
 def create_server(db: Session, payload: dict) -> Server:
@@ -399,7 +414,6 @@ def _ensure_crypto(server: Server) -> None:
         params = generate_params()
         server.awg_public = keys.public_b64
         server.awg_private_enc = _box().encrypt(keys.private_b64)
-        server.awg_port = server.awg_port or 51820
         _store_params(server, params)
 
 
@@ -562,7 +576,7 @@ def precheck_worker(job_id: str, server_id: str | None) -> None:
         server.precheck_json = json.dumps(report.to_json(), ensure_ascii=False)
         used = set(report.used_ports)
         if server.role in {"entry", "standby_entry"}:
-            server.awg_port = pick_port(used, [server.awg_port or 0], 40000)
+            server.awg_port = choose_awg_port(server.awg_port, used)
             prefer = [443] if report.raw.get("port_443_tcp_free") else []
             server.reality_port = pick_port(used, prefer, 8443)
         else:
@@ -652,7 +666,7 @@ def assemble(db: Session):
     awg_text = render_server_conf(
         server_private_key=_box().decrypt(entry.awg_private_enc),
         address_cidr=f"{AWG_SERVER_IP}/{AWG_CIDR}",
-        listen_port=entry.awg_port or 51820,
+        listen_port=entry_awg_port(entry),
         params=params,
         peers=peers,
     )
@@ -978,13 +992,13 @@ def export_client(db: Session, client: Client) -> dict:
             server_public_key=entry.awg_public,
             preshared_key=psk,
             endpoint_host=entry.host,
-            endpoint_port=entry.awg_port or 51820,
+            endpoint_port=entry_awg_port(entry),
         )
         pair_public = client.public_key
         last = build_last_config(
             native_conf=conf,
             host=entry.host,
-            port=entry.awg_port or 51820,
+            port=entry.awg_port,
             client_ip=client.address,
             client_private=private,
             client_public=pair_public,
@@ -997,7 +1011,7 @@ def export_client(db: Session, client: Client) -> dict:
         envelope = build_envelope(
             host=entry.host,
             description=client.name,
-            port=entry.awg_port or 51820,
+            port=entry.awg_port,
             last_config=last,
             dns1=dns1,
             dns2=dns2,

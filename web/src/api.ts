@@ -37,6 +37,9 @@ export type Server = {
   demo: boolean;
   awg_port: number | null;
   reality_port: number | null;
+  hysteria_port: number | null;
+  sub_port: number | null;
+  ports: { id: string; label: string; proto: string; value: number | null; client_facing: boolean; exposed: boolean; note?: string }[];
   link_protocol: string;
   protocols: string[];
   protocol_ids: string[];

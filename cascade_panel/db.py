@@ -34,6 +34,8 @@ def init_db(path: Path) -> None:
         _ensure_column(conn, "list_sources", "selector", "VARCHAR(64) DEFAULT ''")
         _ensure_column(conn, "servers", "protocols_json", "TEXT DEFAULT ''")
         _ensure_column(conn, "clients", "counters_json", "TEXT DEFAULT '{}'")
+        _ensure_column(conn, "servers", "hysteria_port", "INTEGER")
+        _ensure_column(conn, "servers", "sub_port", "INTEGER")
     _Session = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
 
 

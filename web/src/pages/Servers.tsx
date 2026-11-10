@@ -206,6 +206,12 @@ function EditServer({ server, onClose }: { server: Server | null; onClose: () =>
   const [error, setError] = useState("");
   const [checks, setChecks] = useState<Check[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [portForm, setPortForm] = useState<Record<string, string>>(() => {
+    const next: Record<string, string> = {};
+    for (const row of server?.ports || []) next[row.id] = row.value ? String(row.value) : "";
+    return next;
+  });
   const canAwg = form.role === "entry" || form.role === "standby_entry";
 
   async function submit(event: FormEvent) {
@@ -232,6 +238,23 @@ function EditServer({ server, onClose }: { server: Server | null; onClose: () =>
           protocols,
         }),
       });
+      const portBody: Record<string, number> = {};
+      for (const [key, value] of Object.entries(portForm)) {
+        if (!value) continue;
+        const number = Number(value);
+        if (!Number.isInteger(number) || number < 1024 || number > 65535) {
+          throw new Error("порт должен быть от 1024 до 65535");
+        }
+        portBody[key] = number;
+      }
+      if (Object.keys(portBody).length) {
+        const applied = await api<{ job_id: string | null; clients_need_refresh: boolean }>(`/api/servers/${server.id}/ports`, {
+          method: "PATCH",
+          body: JSON.stringify(portBody),
+        });
+        if (applied.clients_need_refresh) setNotice("Порт для клиентов изменён. Скачайте конфиги заново.");
+        if (applied.job_id) await waitJob(applied.job_id);
+      }
       const job = await api<{ job_id: string }>(`/api/servers/${server.id}/precheck`, { method: "POST" });
       await waitJob(job.job_id);
       const fresh = (await api<Server[]>("/api/servers")).find((item) => item.id === server.id);
@@ -282,6 +305,30 @@ function EditServer({ server, onClose }: { server: Server | null; onClose: () =>
                 >
                   {label}
                 </button>
+              ))}
+            </div>
+            {notice && <div className="rounded-lg bg-teal/10 px-3 py-2 text-sm text-teal">{notice}</div>}
+            <div className="rounded-lg border border-line px-3 py-2 text-sm">
+              <div className="mb-2 text-xs text-mist">Порты прослушивания</div>
+              <p className="mb-2 text-xs text-mist">Смена порта, к которому подключается клиент, потребует заново скачать конфиги. Внутренний tproxy 10808 наружу не открывается.</p>
+              {(server.ports || []).filter((row) => row.id !== "awg_port" || canAwg).map((row) => (
+                <label key={row.id} className="mb-2 block text-xs text-mist">
+                  {row.label}{row.note ? ` (${row.note})` : ""}
+                  <span className="mt-1 flex gap-2">
+                    <input className="w-full rounded-lg border border-line bg-ink px-3 py-2" value={portForm[row.id] ?? ""} onChange={(e) => setPortForm({ ...portForm, [row.id]: e.target.value.replace(/[^\d]/g, "") })} />
+                    <button
+                      type="button"
+                      className="rounded-lg border border-line px-3"
+                      onClick={() => {
+                        void api<{ port: number }>(`/api/servers/${server.id}/port-suggest?field=${row.id}`).then((got) => {
+                          setPortForm((prev) => ({ ...prev, [row.id]: String(got.port) }));
+                        });
+                      }}
+                    >
+                      случайный
+                    </button>
+                  </span>
+                </label>
               ))}
             </div>
             <div className="rounded-lg border border-line px-3 py-2 text-sm">

@@ -74,7 +74,9 @@ def test_client_sync_pushes_conf_without_restarting_the_interface(client):
 
 def test_client_export_uses_the_stored_awg_port(client):
     assert choose_awg_port(51820, {51820, 22}) == 51820
-    assert choose_awg_port(None, {51820, 22}) == 40000
+    fresh_port = choose_awg_port(None, {51820, 22, 443, 8443, 10808})
+    assert 20000 <= fresh_port <= 60000
+    assert fresh_port not in {51820, 22, 443, 8443, 10808}
     client.post("/api/settings/clear-demo")
     created = []
     for name, role in (("entry-1", "entry"), ("exit-a", "exit")):

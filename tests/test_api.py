@@ -2,7 +2,7 @@ import json
 import time
 
 from cascade_panel.awg import INTERFACE_FIELDS, parse_conf, validate_params
-from cascade_panel.bundle import render_install_script, render_remove_script
+from cascade_panel.bundle import render_install_script, render_remove_script, tproxy_nft
 from cascade_panel.service import files_for, load_params, set_connector
 from cascade_panel.ssh_client import FakeSession
 from cascade_panel.vpnuri import decode_vpn_uri
@@ -274,6 +274,14 @@ def test_install_and_remove_scripts_refuse_foreign_containers():
     assert "--entrypoint bash" in script
     assert "--log-driver none" not in script
     assert "is-active cascade-agent" in script
+    assert "src_valid_mark=0" in script
+    assert "src_valid_mark=1" not in script
+    assert "99-cascade.conf" in script
+    nft_rule = [line for line in tproxy_nft().splitlines() if "tproxy ip to" in line][0]
+    assert nft_rule.index("meta mark set 0x63") < nft_rule.index("tproxy ip to :10808")
+    assert "127.0.0.1:10808" not in tproxy_nft()
+    assert "meta mark set 0x0*63 tproxy ip to :10808" in script
+    assert "cascade-fwtest" in script
     assert script.index("https://get.docker.com") < script.rindex("docker.io")
     remove = render_remove_script()
     assert "amnezia-" not in remove

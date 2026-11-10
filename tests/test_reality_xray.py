@@ -27,6 +27,25 @@ def test_reality_keys_are_rawurl_and_old_std_base64_converts():
     assert "%3D" not in link
 
 
+def test_tproxy_inbound_listens_on_all_interfaces():
+    from cascade_panel.routing import RuleView
+    from cascade_panel.xraycfg import entry_config
+
+    material = generate_reality(443)
+    config = entry_config(
+        client_material=material,
+        client_users=[],
+        tproxy_port=10808,
+        rules=[RuleView("1", 1, True, "rest", {"type": "any", "value": ""}, "cascade")],
+        cascade_outbounds=[],
+        cascade_tags=["cascade"],
+        strategy="least_ping",
+    )
+    door = next(item for item in config["inbounds"] if item["tag"] == "tproxy-in")
+    assert door["listen"] == "0.0.0.0"
+    assert door["port"] == 10808
+
+
 def test_xray_accepts_generated_exit_config():
     binary = os.environ.get("XRAY_BIN") or shutil.which("xray") or "/tmp/xray-v26.10.31"
     if not binary or not os.path.isfile(binary):

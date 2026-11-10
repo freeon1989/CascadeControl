@@ -97,6 +97,7 @@ def entry_config(
         "inbounds": [
             {
                 "tag": "tproxy-in",
+                "listen": "0.0.0.0",
                 "port": tproxy_port,
                 "protocol": "dokodemo-door",
                 "settings": {"network": "tcp,udp", "followRedirect": True},

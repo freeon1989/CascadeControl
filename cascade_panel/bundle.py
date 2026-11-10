@@ -26,7 +26,7 @@ table inet cascade {{
   chain prerouting {{
     type filter hook prerouting priority mangle; policy accept;
     iifname "{interface}" meta nfproto ipv6 drop
-    iifname "{interface}" meta l4proto {{ tcp, udp }} tproxy ip to 127.0.0.1:{port} meta mark set 0x63
+    iifname "{interface}" meta l4proto {{ tcp, udp }} meta mark set 0x63 tproxy ip to :{port} counter accept
   }}
 }}
 """
@@ -47,7 +47,9 @@ fi
 awg-quick down "$CONF" >/dev/null 2>&1 || true
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
-sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null
+# 1 заставляет ядро считать источник с fwmark локальным и отбрасывать пакет до INPUT.
+sysctl -w net.ipv4.conf.all.src_valid_mark=0 >/dev/null
+sysctl -w net.ipv4.conf.default.src_valid_mark=0 >/dev/null
 awg-quick up "$CONF"
 nft -f /opt/amnezia/awg/tproxy.nft
 ip rule del fwmark 0x63 table 100 >/dev/null 2>&1 || true
@@ -179,9 +181,19 @@ def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool, xray
     if awg:
         quoted = shlex.quote(awg_name)
         lines += [
+            "log фиксирую src_valid_mark=0, иначе fwmark 0x63 роняет ответы клиенту",
+            "$SUDO tee /etc/sysctl.d/99-cascade.conf >/dev/null << 'EOF'",
+            "net.ipv4.ip_forward = 1",
+            "net.ipv4.conf.all.route_localnet = 1",
+            "net.ipv4.conf.all.src_valid_mark = 0",
+            "net.ipv4.conf.default.src_valid_mark = 0",
+            "EOF",
+            "$SUDO sysctl --system >/dev/null 2>&1 || true",
+            "$SUDO sysctl -w net.ipv4.conf.all.src_valid_mark=0 >/dev/null",
+            "$SUDO sysctl -w net.ipv4.conf.default.src_valid_mark=0 >/dev/null",
             "if $SUDO modprobe amneziawg >/dev/null 2>&1 && command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then",
             "  log ядро умеет AmneziaWG, поднимаю cawg0 на хосте без контейнера",
-            "  $SUDO bash -c 'set -e; CONF=/opt/cascade/awg/cawg0.conf; awg-quick down \"$CONF\" >/dev/null 2>&1 || true; sysctl -w net.ipv4.ip_forward=1 >/dev/null; sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null; sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null; awg-quick up \"$CONF\"; nft -f /opt/cascade/awg/tproxy.nft; ip rule del fwmark 0x63 table 100 >/dev/null 2>&1 || true; ip rule add fwmark 0x63 table 100; ip route replace local 0.0.0.0/0 dev lo table 100'",
+            "  $SUDO bash -c 'set -e; CONF=/opt/cascade/awg/cawg0.conf; awg-quick down \"$CONF\" >/dev/null 2>&1 || true; sysctl -w net.ipv4.ip_forward=1 >/dev/null; sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null; sysctl -w net.ipv4.conf.all.src_valid_mark=0 >/dev/null; sysctl -w net.ipv4.conf.default.src_valid_mark=0 >/dev/null; awg-quick up \"$CONF\"; nft -f /opt/cascade/awg/tproxy.nft; ip rule del fwmark 0x63 table 100 >/dev/null 2>&1 || true; ip rule add fwmark 0x63 table 100; ip route replace local 0.0.0.0/0 dev lo table 100'",
             "else",
             f"  log модуль ядра не найден, контейнер {awg_name}",
             f"  if $SUDO docker ps -a --format '{{{{.Names}}}}' | grep -qx {quoted}; then $SUDO docker rm -f {quoted}; fi",
@@ -257,6 +269,76 @@ def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool, xray
             "  $SUDO journalctl -u cascade-agent -n 50 --no-pager || true",
             "  exit 1",
             "fi",
+        ]
+    if awg and xray:
+        lines += [
+            "log самопроверка пересылки: sysctl, порядок nft и проба через cawg0",
+            "mark=$($SUDO sysctl -n net.ipv4.conf.all.src_valid_mark || echo missing)",
+            "if [ \"$mark\" != 0 ]; then",
+            "  log src_valid_mark=$mark, ядро отбросит пакеты клиента до Xray",
+            "  exit 1",
+            "fi",
+            "chain=$($SUDO nft list chain inet cascade prerouting 2>/dev/null || true)",
+            "if ! printf '%s\\n' \"$chain\" | grep -Eq 'meta mark set 0x0*63 tproxy ip to :10808'; then",
+            "  log в nft нет метки 0x63 перед tproxy на :10808",
+            "  printf '%s\\n' \"$chain\"",
+            "  exit 1",
+            "fi",
+            "if ! ss -lntH | grep -Eq '[:.]10808([^0-9]|$)'; then",
+            "  log Xray не слушает 0.0.0.0:10808",
+            "  $SUDO journalctl -u cascade-xray -n 50 --no-pager || true",
+            "  exit 1",
+            "fi",
+            "if ! command -v awg >/dev/null 2>&1 || ! $SUDO ip link show cawg0 >/dev/null 2>&1; then",
+            "  log проба из netns пропущена: на хосте нет awg или cawg0 ещё не поднялся",
+            "else",
+            "  ns=cascade-fwtest",
+            "  $SUDO ip netns del \"$ns\" >/dev/null 2>&1 || true",
+            "  $SUDO ip link del veth-cascade >/dev/null 2>&1 || true",
+            "  priv=$($SUDO awg genkey)",
+            "  pub=$(printf '%s\\n' \"$priv\" | $SUDO awg pubkey)",
+            "  $SUDO awg set cawg0 peer \"$pub\" allowed-ips 10.10.1.250/32",
+            "  sport=$($SUDO awg show cawg0 listen-port)",
+            "  spub=$($SUDO awg show cawg0 public-key)",
+            "  work=$(mktemp -d)",
+            "  {",
+            "    echo \"[Interface]\"",
+            "    echo \"PrivateKey = $priv\"",
+            "    echo \"Address = 10.10.1.250/32\"",
+            "    grep -E '^(Jc|Jmin|Jmax|S1|S2|S3|S4|H1|H2|H3|H4|HeaderProtectionKey) =' /opt/cascade/awg/cawg0.conf || true",
+            "    echo \"[Peer]\"",
+            "    echo \"PublicKey = $spub\"",
+            "    echo \"AllowedIPs = 0.0.0.0/0, ::/0\"",
+            "    echo \"Endpoint = 10.255.255.1:${sport}\"",
+            "    echo \"PersistentKeepalive = 25\"",
+            "  } > \"$work/client.conf\"",
+            "  $SUDO ip link add veth-cascade type veth peer name veth-ns",
+            "  $SUDO ip addr add 10.255.255.1/30 dev veth-cascade",
+            "  $SUDO ip link set veth-cascade up",
+            "  $SUDO ip netns add \"$ns\"",
+            "  $SUDO ip link set veth-ns netns \"$ns\"",
+            "  $SUDO ip netns exec \"$ns\" ip addr add 10.255.255.2/30 dev veth-ns",
+            "  $SUDO ip netns exec \"$ns\" ip link set veth-ns up",
+            "  $SUDO ip netns exec \"$ns\" ip link set lo up",
+            "  $SUDO ip netns exec \"$ns\" ip route add default via 10.255.255.1 || true",
+            "  probe=fail",
+            "  if $SUDO ip netns exec \"$ns\" awg-quick up \"$work/client.conf\"; then",
+            "    if $SUDO ip netns exec \"$ns\" timeout 12 bash -c 'echo >/dev/tcp/1.1.1.1/443'; then probe=ok; fi",
+            "    $SUDO ip netns exec \"$ns\" awg-quick down \"$work/client.conf\" || true",
+            "  fi",
+            "  $SUDO nft list chain inet cascade prerouting || true",
+            "  $SUDO awg set cawg0 peer \"$pub\" remove || true",
+            "  $SUDO ip netns del \"$ns\" >/dev/null 2>&1 || true",
+            "  $SUDO ip link del veth-cascade >/dev/null 2>&1 || true",
+            "  rm -rf \"$work\"",
+            "  if [ \"$probe\" != ok ]; then",
+            "    log проба из netns через cawg0 до 1.1.1.1:443 не прошла",
+            "    $SUDO journalctl -u cascade-xray -n 30 --no-pager || true",
+            "    exit 1",
+            "  fi",
+            "  log проба через cawg0 дошла до сети, счётчик tproxy смотри выше",
+            "fi",
+            "log пересылка с туннеля в порядке",
         ]
     lines += [
         "log проверка",

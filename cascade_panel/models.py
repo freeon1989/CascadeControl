@@ -32,6 +32,8 @@ class Server(Base):
     demo: Mapped[bool] = mapped_column(Boolean, default=False)
     awg_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reality_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    hysteria_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sub_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     link_protocol: Mapped[str] = mapped_column(String(16), default="vless")
     protocols_json: Mapped[str] = mapped_column(Text, default="")
     awg_public: Mapped[str] = mapped_column(Text, default="")

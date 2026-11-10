@@ -23,7 +23,8 @@ from .bundle import (
     xray_document,
     xray_unit,
 )
-from .chain import build_chain, pick_port
+from .chain import build_chain
+from .ports import subscription_port
 from .crypto import vault
 from .db import session
 from .detect import Probe, classify, classify_body
@@ -114,7 +115,7 @@ def _material(server: Server) -> RealityMaterial:
         dest=f"{server.reality_sni}:443",
         fingerprint="chrome",
         flow="xtls-rprx-vision",
-        port=server.reality_port or 443,
+        port=int(server.reality_port or 0),
     )
 
 
@@ -160,6 +161,12 @@ def _normalize_protocols(role: str, items, strict: bool = True) -> list[str]:
     return chosen
 
 
+def _listening_fields(server: Server) -> list[dict]:
+    from .ports import listening_fields
+
+    return listening_fields(server)
+
+
 def server_view(server: Server) -> dict:
     stats = _stats(server)
     ids = protocol_ids(server)
@@ -177,6 +184,9 @@ def server_view(server: Server) -> dict:
         "demo": server.demo,
         "awg_port": server.awg_port,
         "reality_port": server.reality_port,
+        "hysteria_port": server.hysteria_port,
+        "sub_port": server.sub_port,
+        "ports": _listening_fields(server),
         "link_protocol": server.link_protocol,
         "protocols": protocols,
         "protocol_ids": ids,
@@ -288,13 +298,14 @@ def _guard_role(db: Session, role: str, server_id: str | None) -> None:
 
 
 def _issue_node_crypto(server: Server) -> None:
-    material = generate_reality(server.reality_port or 443)
+    material = generate_reality(int(server.reality_port or 1))
     server.reality_public = material.public_key
     server.reality_private_enc = _box().encrypt(material.private_key)
     server.reality_short_enc = _box().encrypt(material.short_id)
     server.reality_sni = material.sni
     server.node_uuid = material.uuid
-    server.reality_port = material.port
+    if not server.reality_port:
+        server.reality_port = None
     if server.role in {"entry", "standby_entry"}:
         keys = generate_wg_keypair()
         params = generate_params()
@@ -304,12 +315,10 @@ def _issue_node_crypto(server: Server) -> None:
 
 
 def choose_awg_port(current: int | None, used: set[int]) -> int:
-    """Уже записанный порт не двигаем: после установки его же слушает awg, и ss не повод уводить клиентов на 40000."""
-    if current and 1 <= int(current) <= 65535:
-        return int(current)
-    if 51820 not in used:
-        return 51820
-    return pick_port(set(used), [], 40000)
+    """Уже записанный порт не двигаем: после установки его же слушает awg."""
+    from .ports import keep_or_assign
+
+    return keep_or_assign(current, set(used))
 
 
 def entry_awg_port(server: Server) -> int:
@@ -341,7 +350,6 @@ def create_server(db: Session, payload: dict) -> Server:
         status="unknown",
         demo=False,
         link_protocol=payload.get("link_protocol") or "vless",
-        reality_port=443 if role in {"entry", "exit"} else 8443,
         config_dirty=True,
     )
     _issue_node_crypto(server)
@@ -401,16 +409,106 @@ def update_server(db: Session, server: Server, payload: dict) -> Server:
     return server
 
 
+def update_ports(db: Session, server: Server, payload: dict) -> dict:
+    """Записывает присланные порты. Пустые поля не затирают уже выбранные."""
+    from .ports import used_ports_of, validate_port_map
+
+    fields = ("awg_port", "reality_port", "hysteria_port", "sub_port")
+    if server.role not in ENTRY_ROLES:
+        fields = ("reality_port", "hysteria_port")
+    current = {key: getattr(server, key) for key in ("awg_port", "reality_port", "hysteria_port", "sub_port")}
+    incoming: dict[str, int | None] = {}
+    for key in fields:
+        if key not in payload or payload[key] is None:
+            continue
+        incoming[key] = int(payload[key])
+    validate_port_map(incoming, current, used_ports_of(server))
+    merged = dict(current)
+    merged.update({key: value for key, value in incoming.items() if value is not None})
+    numbers = [int(value) for value in merged.values() if value]
+    if len(numbers) != len(set(numbers)):
+        raise ValueError("порты на узле не должны повторяться")
+    changed = []
+    for key, value in incoming.items():
+        if current.get(key) == value:
+            continue
+        setattr(server, key, value)
+        changed.append(key)
+    client_facing = any(
+        key == "awg_port" or key == "sub_port" or (key == "reality_port" and server.role in ENTRY_ROLES) for key in changed
+    )
+    if changed:
+        server.config_dirty = True
+    return {"changed": changed, "client_facing": client_facing}
+
+
+def affected_port_ids(db: Session, server: Server) -> list[str]:
+    ids = [server.id]
+    if server.role in {"exit", "standby_exit"}:
+        roles = ("entry", "transit")
+    elif server.role == "transit":
+        roles = ("entry",)
+    else:
+        roles = ()
+    for node in db.scalars(select(Server).where(Server.role.in_(roles))).all() if roles else []:
+        if node.id not in ids:
+            ids.append(node.id)
+    return ids
+
+
+def start_port_job(server_id: str, client_facing: bool) -> str:
+    job_id = str(uuid.uuid4())
+    with session() as db:
+        server = db.get(Server, server_id)
+        if server is None:
+            raise ValueError("узел не найден")
+        remote = (not server.demo) and server.status not in {"", "unknown"}
+        targets = affected_port_ids(db, server)
+        db.add(Job(id=job_id, server_id=server_id, kind="ports", status="running"))
+
+    def worker() -> None:
+        try:
+            _port_worker(job_id, server_id, targets, client_facing, remote)
+        except Exception as exc:  # noqa: BLE001
+            _log(job_id, "ports", f"{exc.__class__.__name__}: {exc}", "error")
+            _close_job(job_id, "error")
+
+    threading.Thread(target=worker, name="cascade-ports", daemon=True).start()
+    return job_id
+
+
+def _port_worker(job_id: str, server_id: str, targets: list[str], client_facing: bool, remote: bool) -> None:
+    _log(job_id, "ports", "порты записаны в базу")
+    if client_facing:
+        _log(job_id, "ports", "клиентские конфиги собраны заново, их нужно скачать ещё раз")
+    if not remote:
+        _log(job_id, "ports", "узел ещё не установлен, файрвол обновится вместе с установкой")
+        _close_job(job_id, "done")
+        return
+    for target_id in targets:
+        with session() as db:
+            node = db.get(Server, target_id)
+            if node is None or node.demo or node.status in {"", "unknown"}:
+                label = node.name if node else target_id
+                _log(job_id, "ports", f"{label}: удалённо не перенастраиваю")
+                continue
+            label = node.name
+        _log(job_id, "ports", f"перенастройка {label}")
+        install_worker(job_id, target_id, finish=False)
+    _close_job(job_id, "done")
+
+
 def _ensure_crypto(server: Server) -> None:
     """Дописывает только отсутствующие ключи. Уже выпущенные не меняет."""
     if not server.reality_private_enc or not server.node_uuid:
-        material = generate_reality(server.reality_port or 443)
+        material = generate_reality(int(server.reality_port or 1))
         server.reality_public = material.public_key
         server.reality_private_enc = _box().encrypt(material.private_key)
         server.reality_short_enc = _box().encrypt(material.short_id)
         server.reality_sni = material.sni
         server.node_uuid = material.uuid
-        server.reality_port = server.reality_port or material.port
+        if not server.reality_port:
+            server.reality_port = None
     if server.role in ENTRY_ROLES and not server.awg_private_enc:
         keys = generate_wg_keypair()
         params = generate_params()
@@ -938,13 +1036,9 @@ def precheck_worker(job_id: str, server_id: str | None) -> None:
         assert server
         was_dirty = server.config_dirty
         server.precheck_json = json.dumps(report.to_json(), ensure_ascii=False)
-        used = set(report.used_ports)
-        if server.role in {"entry", "standby_entry"}:
-            server.awg_port = choose_awg_port(server.awg_port, used)
-            prefer = [443] if report.raw.get("port_443_tcp_free") else []
-            server.reality_port = pick_port(used, prefer, 8443)
-        else:
-            server.reality_port = pick_port(used, [server.reality_port or 0] if server.reality_port not in used else [], 2053)
+        from .ports import ensure_listen_ports
+
+        ensure_listen_ports(server, set(report.used_ports))
         server.config_dirty = True
     failed = [item for item in report.checks if item.level == "fail"]
     summary = "; ".join(f"{item.title}: {item.detail}" for item in failed)[:500]
@@ -960,9 +1054,12 @@ def precheck_worker(job_id: str, server_id: str | None) -> None:
 
 def assemble(db: Session):
     from .editor import migrate_geo_rules
+    from .ports import ensure_listen_ports, used_ports_of
 
     migrate_geo_rules(db)
     servers = list(db.scalars(select(Server)).all())
+    for server in servers:
+        ensure_listen_ports(server, used_ports_of(server))
     entry = next((s for s in servers if s.role == "entry"), None)
     if entry is None:
         raise ValueError("нет активного входа")
@@ -1074,7 +1171,7 @@ def assemble(db: Session):
             for src in db.scalars(select(ListSource)).all()
         ],
         "subscription": {
-            "listen": f"0.0.0.0:{SUB_PORT}",
+            "listen": f"0.0.0.0:{subscription_port(entry)}",
             "path": "/sub/",
             "clients": sub_clients,
         },
@@ -1107,12 +1204,15 @@ def files_for(db: Session, server: Server) -> dict[str, str]:
             files["/opt/cascade/awg/tproxy.nft"] = tproxy_nft()
         files["/etc/cascade-agent/config.json"] = agent_document(agent)
         files["/opt/cascade/agent/cascade-agent.service"] = agent_unit()
+    from .ports import public_ports
+
     script = render_install_script(
         role=server.role,
         awg=want_awg,
         xray=want_xray,
         agent=server.role == "entry",
-        xray_port=server.reality_port or 443,
+        xray_port=int(server.reality_port or 0),
+        public_ports=public_ports(server),
     )
     files["/opt/cascade/install.sh"] = script
     return files
@@ -1388,7 +1488,7 @@ def export_client(db: Session, client: Client) -> dict:
         body = subscription_body([link])
         result["vless_uri"] = link
         result["subscription"] = body
-        result["subscription_url"] = f"http://{entry.host}:{SUB_PORT}/sub/{client.sub_token}"
+        result["subscription_url"] = f"http://{entry.host}:{subscription_port(entry)}/sub/{client.sub_token}"
         result["qr_vless"] = _safe_qr(link)
     if client.protocol == "vless":
         result["note"] = "Формат .conf AmneziaWG относится к клиентам AWG. Для этого клиента — ссылка VLESS и подписка."

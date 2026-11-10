@@ -99,7 +99,50 @@ WantedBy=multi-user.target
 """
 
 
-def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool, xray_port: int = 443) -> str:
+def firewall_lines(ports: list[tuple[int, str]]) -> list[str]:
+    """Открывает публичные порты в ufw, firewalld, iptables и отдельной таблице nft.
+
+    Таблицу tproxy `inet cascade` не трогает. Порт 10808 сюда не передаётся.
+    """
+    lines = ["log публикую порты наружу, внутренний tproxy 10808 не открываю"]
+    rules = []
+    for port, proto in ports:
+        port = int(port)
+        proto = "udp" if proto == "udp" else "tcp"
+        if port == TPROXY_PORT or port < 1 or port > 65535:
+            continue
+        lines.append(
+            f"if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q 'Status: active'; then $SUDO ufw allow {port}/{proto} || true; log ufw {port}/{proto}; fi"
+        )
+        lines.append(
+            f"if command -v firewall-cmd >/dev/null 2>&1 && $SUDO firewall-cmd --state >/dev/null 2>&1; then $SUDO firewall-cmd --permanent --add-port={port}/{proto} || true; $SUDO firewall-cmd --reload || true; log firewalld {port}/{proto}; fi"
+        )
+        lines.append(
+            f"if command -v iptables >/dev/null 2>&1; then $SUDO iptables -C INPUT -p {proto} --dport {port} -j ACCEPT 2>/dev/null || $SUDO iptables -I INPUT -p {proto} --dport {port} -j ACCEPT || true; log iptables {port}/{proto}; fi"
+        )
+        rules.append(f"{proto} dport {port} accept")
+    if rules:
+        lines += [
+            "if command -v nft >/dev/null 2>&1; then",
+            "  $SUDO nft delete table inet cascade-public >/dev/null 2>&1 || true",
+            "  $SUDO nft add table inet cascade-public",
+            "  $SUDO nft add chain inet cascade-public input '{ type filter hook input priority 0 ; policy accept ; }'",
+        ]
+        for rule in rules:
+            lines.append(f"  $SUDO nft add rule inet cascade-public input {rule}")
+        lines.append("fi")
+    return lines
+
+
+def render_install_script(
+    *,
+    role: str,
+    awg: bool,
+    xray: bool,
+    agent: bool,
+    xray_port: int = 443,
+    public_ports: list[tuple[int, str]] | None = None,
+) -> str:
     """Скрипт установки. Удаляет только контейнеры cascade-*."""
     awg_name = assert_own_container("cascade-awg")
     lines = [
@@ -149,6 +192,7 @@ def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool, xray
         "fi",
         "$SUDO systemctl enable --now docker >/dev/null 2>&1 || true",
     ]
+    lines += firewall_lines(public_ports or ([] if not xray else [(int(xray_port), "tcp")]))
     if awg:
         lines += [
             "if ! command -v docker >/dev/null 2>&1; then",

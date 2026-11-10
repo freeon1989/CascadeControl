@@ -12,6 +12,7 @@ const titles: Record<string, string> = {
   update: "Обновление",
   alert: "Предупреждение",
   "dns-log": "Журнал сайтов",
+  ports: "Порты",
 };
 
 export function JournalPage() {

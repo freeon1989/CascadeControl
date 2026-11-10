@@ -51,6 +51,8 @@ from .service import (
     monitor_board,
     monitor_detail,
     start_dns_log_job,
+    start_port_job,
+    update_ports,
     update_server,
     decide,
     export_client,
@@ -89,6 +91,13 @@ class ServerIn(BaseModel):
     role: str
     country: str = ""
     link_protocol: str = "vless"
+
+
+class PortsIn(BaseModel):
+    awg_port: int | None = None
+    reality_port: int | None = None
+    hysteria_port: int | None = None
+    sub_port: int | None = None
 
 
 class ServerPatch(BaseModel):
@@ -296,6 +305,41 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
                 return server_view(server)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    @app.patch("/api/servers/{server_id}/ports")
+    def patch_ports(server_id: str, body: PortsIn) -> dict:
+        try:
+            with session() as db:
+                server = db.get(Server, server_id)
+                if server is None:
+                    raise HTTPException(404, "узел не найден")
+                result = update_ports(db, server, body.model_dump(exclude_unset=True))
+                view = server_view(server)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        job_id = start_port_job(server_id, result["client_facing"]) if result["changed"] else None
+        return {"server": view, "job_id": job_id, "clients_need_refresh": result["client_facing"]}
+
+    @app.get("/api/servers/{server_id}/port-suggest")
+    def port_suggest(server_id: str, field: str = "reality_port") -> dict:
+        from .ports import random_high_port, used_ports_of
+
+        allowed = {"awg_port", "reality_port", "hysteria_port", "sub_port"}
+        if field not in allowed:
+            raise HTTPException(400, "неизвестное поле порта")
+        with session() as db:
+            server = db.get(Server, server_id)
+            if server is None:
+                raise HTTPException(404, "узел не найден")
+            used = used_ports_of(server)
+            for key in allowed:
+                current = getattr(server, key)
+                if current:
+                    used.add(int(current))
+            if server.ssh_port:
+                used.add(int(server.ssh_port))
+            port = random_high_port(used)
+        return {"field": field, "port": port}
 
     @app.post("/api/servers/{server_id}/role")
     def post_role(server_id: str, body: RoleIn) -> dict:

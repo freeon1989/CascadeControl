@@ -27,7 +27,19 @@ def init_db(path: Path) -> None:
         conn.exec_driver_sql("PRAGMA journal_mode=WAL")
         conn.exec_driver_sql("PRAGMA foreign_keys=ON")
     Base.metadata.create_all(_engine)
+    with _engine.begin() as conn:
+        _ensure_column(conn, "routing_rules", "chain_id", "VARCHAR(36)")
+        _ensure_column(conn, "routing_rules", "group_id", "VARCHAR(36)")
+        _ensure_column(conn, "list_sources", "interval_hours", "INTEGER DEFAULT 24")
+        _ensure_column(conn, "list_sources", "selector", "VARCHAR(64) DEFAULT ''")
     _Session = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
+
+
+def _ensure_column(conn, table: str, column: str, ddl: str) -> None:
+    rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+    names = {row[1] for row in rows}
+    if column not in names:
+        conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def reset_db() -> None:

@@ -10,6 +10,7 @@ from cascade_panel.db import reset_db
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("CASCADE_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("CASCADE_SEED", "1")
+    monkeypatch.setenv("CASCADE_SCHEDULER", "0")
     reset_vault_cache()
     reset_db()
     application = create_app(tmp_path / "cascade.db", do_seed=True)

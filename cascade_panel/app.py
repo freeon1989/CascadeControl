@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import threading
 import uuid
 from pathlib import Path
 
@@ -14,6 +16,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from . import __version__
+from .editor import (
+    chain_is_used,
+    group_is_used,
+    replace_group_members,
+    replace_transits,
+    validate_action,
+    validate_chain,
+    validate_match,
+)
+from .models import Chain, ChainTransit, ExitGroup, ExitGroupMember
 from .db import init_db, session
 from .detect import probe_domain
 from .models import AddressEntry, Balance, Client, Job, JobLine, ListSource, RoutingRule, Server, Setting
@@ -29,6 +41,10 @@ from .service import (
     export_client,
     ingest_list_text,
     install_worker,
+    run_due_sources,
+    set_detect_enabled,
+    set_preset_enabled,
+    upsert_address,
     overview,
     precheck_worker,
     record_detection,
@@ -71,6 +87,8 @@ class RuleIn(BaseModel):
     match: dict
     action: str
     exit_id: str | None = None
+    chain_id: str | None = None
+    group_id: str | None = None
     enabled: bool = True
 
 
@@ -79,7 +97,28 @@ class RulePatch(BaseModel):
     match: dict | None = None
     action: str | None = None
     exit_id: str | None = None
+    chain_id: str | None = None
+    group_id: str | None = None
     enabled: bool | None = None
+
+
+class MemberIn(BaseModel):
+    server_id: str
+    weight: int = 1
+    standby: bool = False
+
+
+class GroupIn(BaseModel):
+    name: str
+    members: list[MemberIn]
+
+
+class ChainIn(BaseModel):
+    name: str
+    entry_id: str
+    transit_ids: list[str] = []
+    exit_id: str | None = None
+    group_id: str | None = None
 
 
 class OrderIn(BaseModel):
@@ -96,6 +135,31 @@ class BalanceIn(BaseModel):
 class DnsIn(BaseModel):
     dns1: str
     dns2: str
+
+
+class SourceIn(BaseModel):
+    id: str
+    title: str
+    url: str
+    kind: str = "domain"
+    action: str = "cascade"
+    enabled: bool = True
+    interval_hours: int = 24
+    selector: str = ""
+
+
+class AddressIn(BaseModel):
+    kind: str = "domain"
+    value: str
+    action: str = "cascade"
+
+
+class DetectToggle(BaseModel):
+    enabled: bool
+
+
+class PresetToggle(BaseModel):
+    enabled: bool
 
 
 class DetectIn(BaseModel):
@@ -332,17 +396,25 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
 
     @app.post("/api/rules")
     def post_rule(body: RuleIn) -> dict:
-        if body.action not in {"direct", "cascade", "exit", "block"}:
-            raise HTTPException(400, "неизвестное действие")
+        try:
+            match = validate_match(body.match)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         with session() as db:
+            try:
+                validate_action(db, body.action, body.exit_id, body.chain_id, body.group_id)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
             positions = list(db.scalars(select(RoutingRule.position)).all())
             rule = RoutingRule(
                 id=str(uuid.uuid4()),
                 position=(max(positions) + 1) if positions else 1,
-                name=body.name,
-                match_json=json.dumps(body.match, ensure_ascii=False),
+                name=body.name.strip(),
+                match_json=json.dumps(match, ensure_ascii=False),
                 action=body.action,
-                exit_id=body.exit_id,
+                exit_id=body.exit_id if body.action == "exit" else None,
+                chain_id=body.chain_id if body.action == "chain" else None,
+                group_id=body.group_id if body.action == "group" else None,
                 enabled=body.enabled,
             )
             db.add(rule)
@@ -361,11 +433,28 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             if body.name is not None:
                 rule.name = body.name
             if body.match is not None:
-                rule.match_json = json.dumps(body.match, ensure_ascii=False)
+                try:
+                    rule.match_json = json.dumps(validate_match(body.match), ensure_ascii=False)
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
             if body.action is not None:
                 rule.action = body.action
             if body.exit_id is not None:
                 rule.exit_id = body.exit_id or None
+            if body.chain_id is not None:
+                rule.chain_id = body.chain_id or None
+            if body.group_id is not None:
+                rule.group_id = body.group_id or None
+            try:
+                validate_action(db, rule.action, rule.exit_id, rule.chain_id, rule.group_id)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            if rule.action != "exit":
+                rule.exit_id = None
+            if rule.action != "chain":
+                rule.chain_id = None
+            if rule.action != "group":
+                rule.group_id = None
             if body.enabled is not None:
                 rule.enabled = body.enabled
             entry = db.scalar(select(Server).where(Server.role == "entry"))
@@ -391,6 +480,148 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             if rule is None:
                 raise HTTPException(404, "правило не найдено")
             db.delete(rule)
+        return {"ok": True}
+
+    def _group_view(db, group: ExitGroup) -> dict:
+        members = db.scalars(select(ExitGroupMember).where(ExitGroupMember.group_id == group.id)).all()
+        servers = {row.id: row for row in db.scalars(select(Server)).all()}
+        return {
+            "id": group.id,
+            "name": group.name,
+            "members": [
+                {
+                    "server_id": member.server_id,
+                    "name": servers[member.server_id].name if member.server_id in servers else "",
+                    "role": servers[member.server_id].role if member.server_id in servers else "",
+                    "demo": servers[member.server_id].demo if member.server_id in servers else False,
+                    "weight": member.weight,
+                    "standby": member.standby,
+                }
+                for member in members
+            ],
+        }
+
+    def _chain_view(db, chain: Chain) -> dict:
+        hops = db.scalars(
+            select(ChainTransit).where(ChainTransit.chain_id == chain.id).order_by(ChainTransit.position)
+        ).all()
+        servers = {row.id: row for row in db.scalars(select(Server)).all()}
+
+        def brief(server_id: str | None) -> dict | None:
+            if not server_id or server_id not in servers:
+                return None
+            node = servers[server_id]
+            return {"id": node.id, "name": node.name, "role": node.role, "demo": node.demo}
+
+        return {
+            "id": chain.id,
+            "name": chain.name,
+            "entry_id": chain.entry_id,
+            "entry": brief(chain.entry_id),
+            "transit_ids": [hop.server_id for hop in hops],
+            "transits": [brief(hop.server_id) for hop in hops],
+            "exit_id": chain.exit_id,
+            "exit": brief(chain.exit_id),
+            "group_id": chain.group_id,
+        }
+
+    @app.get("/api/groups")
+    def get_groups() -> list:
+        with session() as db:
+            return [_group_view(db, row) for row in db.scalars(select(ExitGroup)).all()]
+
+    @app.post("/api/groups")
+    def post_group(body: GroupIn) -> dict:
+        with session() as db:
+            group = ExitGroup(id=str(uuid.uuid4()), name=body.name.strip())
+            if not group.name:
+                raise HTTPException(400, "нужно имя группы")
+            db.add(group)
+            db.flush()
+            try:
+                replace_group_members(db, group.id, [item.model_dump() for item in body.members])
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            return _group_view(db, group)
+
+    @app.put("/api/groups/{group_id}")
+    def put_group(group_id: str, body: GroupIn) -> dict:
+        with session() as db:
+            group = db.get(ExitGroup, group_id)
+            if group is None:
+                raise HTTPException(404, "группа не найдена")
+            group.name = body.name.strip() or group.name
+            try:
+                replace_group_members(db, group.id, [item.model_dump() for item in body.members])
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            return _group_view(db, group)
+
+    @app.delete("/api/groups/{group_id}")
+    def delete_group(group_id: str) -> dict:
+        with session() as db:
+            group = db.get(ExitGroup, group_id)
+            if group is None:
+                raise HTTPException(404, "группа не найдена")
+            if group_is_used(db, group_id):
+                raise HTTPException(400, "группа используется каскадом или правилом")
+            for member in db.scalars(select(ExitGroupMember).where(ExitGroupMember.group_id == group_id)).all():
+                db.delete(member)
+            db.delete(group)
+        return {"ok": True}
+
+    @app.get("/api/chains")
+    def get_chains() -> list:
+        with session() as db:
+            return [_chain_view(db, row) for row in db.scalars(select(Chain)).all()]
+
+    @app.post("/api/chains")
+    def post_chain(body: ChainIn) -> dict:
+        with session() as db:
+            try:
+                validate_chain(db, body.entry_id, body.transit_ids, body.exit_id, body.group_id)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            chain = Chain(
+                id=str(uuid.uuid4()),
+                name=body.name.strip() or "Каскад",
+                entry_id=body.entry_id,
+                exit_id=body.exit_id,
+                group_id=body.group_id,
+            )
+            db.add(chain)
+            db.flush()
+            replace_transits(db, chain.id, body.transit_ids)
+            return _chain_view(db, chain)
+
+    @app.put("/api/chains/{chain_id}")
+    def put_chain(chain_id: str, body: ChainIn) -> dict:
+        with session() as db:
+            chain = db.get(Chain, chain_id)
+            if chain is None:
+                raise HTTPException(404, "каскад не найден")
+            try:
+                validate_chain(db, body.entry_id, body.transit_ids, body.exit_id, body.group_id)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            chain.name = body.name.strip() or chain.name
+            chain.entry_id = body.entry_id
+            chain.exit_id = body.exit_id
+            chain.group_id = body.group_id
+            replace_transits(db, chain.id, body.transit_ids)
+            return _chain_view(db, chain)
+
+    @app.delete("/api/chains/{chain_id}")
+    def delete_chain(chain_id: str) -> dict:
+        with session() as db:
+            chain = db.get(Chain, chain_id)
+            if chain is None:
+                raise HTTPException(404, "каскад не найден")
+            if chain_is_used(db, chain_id):
+                raise HTTPException(400, "каскад используется правилом")
+            for hop in db.scalars(select(ChainTransit).where(ChainTransit.chain_id == chain_id)).all():
+                db.delete(hop)
+            db.delete(chain)
         return {"ok": True}
 
     @app.post("/api/route/decide")
@@ -482,12 +713,96 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
                     "kind": row.kind,
                     "action": row.action,
                     "enabled": row.enabled,
+                    "interval_hours": row.interval_hours or 24,
+                    "selector": row.selector or "",
                     "last_fetch": row.last_fetch,
                     "last_count": row.last_count,
                     "last_error": row.last_error,
                 }
                 for row in rows
             ]
+
+    @app.post("/api/sources")
+    def post_source(body: SourceIn) -> dict:
+        kind = body.kind
+        if kind not in {"domain", "cidr", "geosite-dat"}:
+            raise HTTPException(400, "тип списка: domain, cidr или geosite-dat")
+        if not body.url.startswith("http://") and not body.url.startswith("https://"):
+            raise HTTPException(400, "нужен http(s) адрес списка")
+        with session() as db:
+            if db.get(ListSource, body.id):
+                raise HTTPException(400, "такой источник уже есть")
+            row = ListSource(
+                id=body.id.strip(),
+                title=body.title.strip() or body.id.strip(),
+                url=body.url.strip(),
+                kind=kind,
+                action=body.action if body.action in {"direct", "cascade", "block"} else "cascade",
+                enabled=body.enabled,
+                interval_hours=max(1, min(body.interval_hours, 168)),
+                selector=body.selector.strip(),
+            )
+            db.add(row)
+            db.flush()
+            return {"id": row.id, "title": row.title}
+
+    @app.put("/api/sources/{source_id}")
+    def put_source(source_id: str, body: SourceIn) -> dict:
+        with session() as db:
+            row = db.get(ListSource, source_id)
+            if row is None:
+                raise HTTPException(404, "источник не найден")
+            row.title = body.title.strip() or row.title
+            row.url = body.url.strip() or row.url
+            if body.kind in {"domain", "cidr", "geosite-dat"}:
+                row.kind = body.kind
+            if body.action in {"direct", "cascade", "block"}:
+                row.action = body.action
+            row.enabled = body.enabled
+            row.interval_hours = max(1, min(body.interval_hours, 168))
+            row.selector = body.selector.strip()
+            return {"id": row.id}
+
+    @app.delete("/api/sources/{source_id}")
+    def delete_source(source_id: str) -> dict:
+        with session() as db:
+            row = db.get(ListSource, source_id)
+            if row is None:
+                raise HTTPException(404, "источник не найден")
+            db.delete(row)
+        return {"ok": True}
+
+    @app.post("/api/addresses")
+    def post_address(body: AddressIn) -> dict:
+        with session() as db:
+            if body.kind == "domain":
+                from .lists import parse_domain_list
+
+                values = parse_domain_list(body.value)
+                kind = "domain"
+            elif body.kind == "cidr":
+                from .lists import parse_cidr_list
+
+                values = parse_cidr_list(body.value)
+                kind = "cidr"
+            else:
+                raise HTTPException(400, "тип: domain или cidr")
+            if len(values) != 1:
+                raise HTTPException(400, "нужен один домен или одна сеть")
+            action = body.action if body.action in {"direct", "cascade", "block"} else "cascade"
+            row = upsert_address(db, kind, values[0], action, "manual")
+            if row is None:
+                raise HTTPException(400, "адрес в списке исключений")
+            return {"id": row.id, "value": row.value, "source": row.source, "source_date": row.source_date}
+
+    @app.delete("/api/addresses/{entry_id}")
+    def delete_address(entry_id: str) -> dict:
+        with session() as db:
+            row = db.get(AddressEntry, entry_id)
+            if row is None:
+                raise HTTPException(404, "адрес не найден")
+            db.delete(row)
+        return {"ok": True}
 
     @app.post("/api/sources/{source_id}/refresh")
     def post_refresh(source_id: str) -> dict:
@@ -512,6 +827,19 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
             return {"count": count}
+
+    @app.post("/api/presets/{preset_id}/enabled")
+    def post_preset_enabled(preset_id: str, body: PresetToggle) -> dict:
+        try:
+            with session() as db:
+                return set_preset_enabled(db, preset_id, body.enabled)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.put("/api/detect")
+    def put_detect(body: DetectToggle) -> dict:
+        with session() as db:
+            return set_detect_enabled(db, body.enabled)
 
     @app.post("/api/presets/{preset_id}/apply")
     def post_preset(preset_id: str) -> dict:
@@ -586,5 +914,21 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
                 "<pre>npm --prefix web ci && npm --prefix web run build</pre>"
                 "<p>API уже отвечает на <a style='color:#2ee6c7' href='/api/health'>/api/health</a>.</p>"
             )
+
+    if os.environ.get("CASCADE_SCHEDULER", "1") != "0":
+
+        def _refresh_loop() -> None:
+            import time
+
+            time.sleep(45)
+            while True:
+                try:
+                    with session() as db:
+                        run_due_sources(db)
+                except Exception:
+                    pass
+                time.sleep(3600)
+
+        threading.Thread(target=_refresh_loop, name="cascade-lists", daemon=True).start()
 
     return app

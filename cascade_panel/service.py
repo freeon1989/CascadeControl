@@ -158,6 +158,8 @@ def rule_view(rule: RoutingRule) -> dict:
         "match": json.loads(rule.match_json),
         "action": rule.action,
         "exit_id": rule.exit_id,
+        "chain_id": rule.chain_id,
+        "group_id": rule.group_id,
         "enabled": rule.enabled,
         "hits": rule.hits,
     }
@@ -174,6 +176,8 @@ def _rules(db: Session) -> list[RuleView]:
             match=json.loads(row.match_json),
             action=row.action,
             exit_id=row.exit_id,
+            chain_id=row.chain_id,
+            group_id=row.group_id,
             hits=row.hits,
         )
         for row in rows
@@ -739,6 +743,17 @@ def upsert_address(db: Session, kind: str, value: str, action: str, source: str)
     return row
 
 
+def ingest_values(db: Session, source: ListSource, kind: str, values: list[str], note: str = "") -> int:
+    count = 0
+    for value in values:
+        if upsert_address(db, kind, value, source.action, f"list:{source.id}"):
+            count += 1
+    source.last_count = count
+    source.last_fetch = now_iso()
+    source.last_error = note
+    return count
+
+
 def ingest_list_text(db: Session, source: ListSource, text: str) -> int:
     if source.kind == "domain":
         values = parse_domain_list(text)
@@ -746,24 +761,26 @@ def ingest_list_text(db: Session, source: ListSource, text: str) -> int:
     elif source.kind == "cidr":
         values = parse_cidr_list(text)
         kind = "cidr"
+    elif source.kind == "geosite-dat":
+        raise ValueError("geosite.dat обновляется кнопкой «Обновить сейчас», не текстом")
     else:
-        raise ValueError(source.last_error or "этот формат списка пока не разбирается")
-    count = 0
-    for value in values:
-        if upsert_address(db, kind, value, source.action, f"list:{source.id}"):
-            count += 1
-    source.last_count = count
-    source.last_fetch = now_iso()
-    source.last_error = ""
-    return count
+        raise ValueError("этот формат списка не разбирается")
+    return ingest_values(db, source, kind, values)
 
 
 def refresh_source(db: Session, source: ListSource) -> int:
-    if source.kind == "geosite-dat":
-        source.last_error = "бинарный geosite.dat будет в следующей версии; подключите текстовый список"
-        source.last_fetch = now_iso()
-        return 0
+    from .lists import fetch_bytes, parse_geosite_dat
+
     try:
+        if source.kind == "geosite-dat":
+            parsed = parse_geosite_dat(fetch_bytes(source.url))
+            selector = (source.selector or "RU").upper()
+            domains = [name for code, names in parsed.items() if code.upper() == selector for name in names]
+            note = ""
+            if len(domains) > 4000:
+                note = f"взяты первые 4000 из {len(domains)}"
+                domains = domains[:4000]
+            return ingest_values(db, source, "domain", domains, note)
         text = fetch_text(source.url)
     except Exception as exc:  # noqa: BLE001
         source.last_error = redact(str(exc))[:300]
@@ -772,12 +789,50 @@ def refresh_source(db: Session, source: ListSource) -> int:
     return ingest_list_text(db, source, text)
 
 
+def run_due_sources(db: Session) -> int:
+    from datetime import datetime, timedelta, timezone
+
+    ran = 0
+    now = datetime.now(timezone.utc)
+    for source in db.scalars(select(ListSource).where(ListSource.enabled.is_(True))).all():
+        interval = source.interval_hours or 24
+        due = not source.last_fetch
+        if source.last_fetch:
+            try:
+                last = datetime.fromisoformat(source.last_fetch)
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                due = now - last >= timedelta(hours=interval)
+            except ValueError:
+                due = True
+        if not due:
+            continue
+        try:
+            refresh_source(db, source)
+        except Exception:
+            pass
+        ran += 1
+    return ran
+
+
 def record_detection(db: Session, domain: str, probe: Probe) -> dict:
     action = classify(probe)
     saved = False
     if action:
         row = upsert_address(db, "domain", domain.lower().rstrip("."), action, "detect")
         saved = row is not None
+    last = db.get(Setting, "detect_last")
+    stamp = now_iso()
+    if last is None:
+        db.add(Setting(key="detect_last", value=stamp))
+    else:
+        last.value = stamp
+    status = db.get(Setting, "detect_status")
+    text = f"последняя проверка {domain}: {probe.status}"
+    if status is None:
+        db.add(Setting(key="detect_status", value=text))
+    else:
+        status.value = text
     return {"domain": domain, "probe": probe.status, "detail": probe.detail, "action": action, "saved": saved}
 
 
@@ -786,6 +841,8 @@ def decide(db: Session, host: str | None, ip: str | None) -> dict:
     for row in db.scalars(select(AddressEntry).where(AddressEntry.excluded.is_(False))).all():
         if row.kind == "domain":
             catalog.geosite.setdefault("manual", set()).add(row.value)
+            if row.source.startswith("list:"):
+                catalog.lists.setdefault(row.source.split(":", 1)[1], set()).add(row.value)
         elif row.kind == "cidr":
             import ipaddress
 
@@ -874,7 +931,9 @@ def chain_summary(db: Session) -> dict:
 
 
 def clear_demo(db: Session) -> None:
-    for model in (JobLine, Job, AddressEntry, RoutingRule, Client, Server):
+    from .models import Chain, ChainTransit, ExitGroup, ExitGroupMember
+
+    for model in (JobLine, Job, AddressEntry, RoutingRule, ChainTransit, Chain, ExitGroupMember, ExitGroup, Client, Server):
         db.query(model).delete()
     demo = db.get(Setting, "demo")
     if demo:
@@ -898,9 +957,77 @@ def settings_view(db: Session) -> dict:
         "demo": demo.value == "1" if demo else False,
         "dns1": dns1,
         "dns2": dns2,
-        "presets": list_presets(),
+        "presets": [
+            {**item, "enabled": preset_enabled_map(db).get(item["id"], False)} for item in list_presets()
+        ],
+        "detect": detect_view(db),
         "hysteria2": hysteria_plan(),
     }
+
+
+def preset_enabled_map(db: Session) -> dict:
+    row = db.get(Setting, "presets_enabled")
+    if row is None or not row.value:
+        return {}
+    try:
+        data = json.loads(row.value)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def set_preset_enabled(db: Session, preset_id: str, enabled: bool) -> dict:
+    from .presets import PRESETS
+
+    preset = PRESETS.get(preset_id)
+    if preset is None:
+        raise ValueError("нет такого пресета")
+    states = preset_enabled_map(db)
+    states[preset_id] = enabled
+    row = db.get(Setting, "presets_enabled")
+    payload = json.dumps(states)
+    if row is None:
+        db.add(Setting(key="presets_enabled", value=payload))
+    else:
+        row.value = payload
+    source = f"preset:{preset_id}"
+    if enabled:
+        for domain in preset["domains"]:
+            upsert_address(db, "domain", domain, preset["action"], source)
+        for cidr in preset["cidrs"]:
+            upsert_address(db, "cidr", cidr, preset["action"], source)
+    else:
+        for entry in db.scalars(select(AddressEntry).where(AddressEntry.source == source)).all():
+            if not entry.pinned:
+                db.delete(entry)
+    return {"id": preset_id, "enabled": enabled}
+
+
+def detect_view(db: Session) -> dict:
+    enabled = db.get(Setting, "detect_enabled")
+    status = db.get(Setting, "detect_status")
+    last = db.get(Setting, "detect_last")
+    return {
+        "enabled": bool(enabled and enabled.value == "1"),
+        "status": status.value if status and status.value else "выключено",
+        "last_run": last.value if last else "",
+    }
+
+
+def set_detect_enabled(db: Session, enabled: bool) -> dict:
+    row = db.get(Setting, "detect_enabled")
+    value = "1" if enabled else "0"
+    if row is None:
+        db.add(Setting(key="detect_enabled", value=value))
+    else:
+        row.value = value
+    text = "включено. Новые домены пишутся в список адресов." if enabled else "выключено"
+    status = db.get(Setting, "detect_status")
+    if status is None:
+        db.add(Setting(key="detect_status", value=text))
+    else:
+        status.value = text
+    return detect_view(db)
 
 
 def apply_preset_rule(db: Session, preset_id: str) -> RoutingRule:

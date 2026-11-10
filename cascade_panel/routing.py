@@ -15,8 +15,10 @@ class RuleView:
     enabled: bool
     name: str
     match: dict
-    action: str  # direct | cascade | exit | block
+    action: str  # direct | cascade | chain | group | exit | block
     exit_id: str | None = None
+    chain_id: str | None = None
+    group_id: str | None = None
     hits: int = 0
 
 
@@ -34,6 +36,7 @@ class Catalog:
 
     geosite: dict[str, set[str]] = field(default_factory=dict)
     geoip: dict[str, list[ipaddress._BaseNetwork]] = field(default_factory=dict)
+    lists: dict[str, set[str]] = field(default_factory=dict)
     extra_domains: dict[str, str] = field(default_factory=dict)  # domain -> action
     extra_cidrs: list[tuple[ipaddress._BaseNetwork, str]] = field(default_factory=list)
 
@@ -48,6 +51,8 @@ def _domain_matches(pattern: str, host: str) -> bool:
 
 
 def _match_clause(clause: dict, host: str | None, ip: str | None, catalog: Catalog) -> bool:
+    if "type" in clause:
+        return _match_typed(str(clause.get("type") or ""), str(clause.get("value") or ""), host, ip, catalog)
     if clause.get("any") is True:
         return True
     if "domain" in clause and host:
@@ -107,6 +112,39 @@ def _match_clause(clause: dict, host: str | None, ip: str | None, catalog: Catal
     return False
 
 
+def _host_exact(pattern: str, host: str) -> bool:
+    return host.lower().rstrip(".") == pattern.lower().rstrip(".")
+
+
+def _match_typed(kind: str, value: str, host: str | None, ip: str | None, catalog: Catalog) -> bool:
+    if kind == "any":
+        return True
+    if kind == "domain" and host:
+        return _host_exact(value, host)
+    if kind == "suffix" and host:
+        return _domain_matches(value, host)
+    if kind == "ip" and ip:
+        return ip == value
+    if kind == "cidr" and ip:
+        try:
+            return ipaddress.ip_address(ip) in ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            return False
+    if kind == "list" and host:
+        names = catalog.lists.get(value, set())
+        h = host.lower().rstrip(".")
+        return any(h == name or h.endswith("." + name) for name in names)
+    if kind == "preset":
+        return _match_clause({"preset": value}, host, ip, catalog)
+    if kind == "geo" and ":" in value:
+        family, name = value.split(":", 1)
+        if family == "geosite":
+            return _match_clause({"geosite": name}, host, ip, catalog)
+        if family == "geoip":
+            return _match_clause({"geoip": name}, host, ip, catalog)
+    return False
+
+
 def evaluate(rules: list[RuleView], host: str | None, ip: str | None, catalog: Catalog | None = None) -> Decision:
     catalog = catalog or Catalog()
     ordered = sorted(rules, key=lambda r: r.position)
@@ -128,7 +166,7 @@ def compile_xray_rules(rules: list[RuleView]) -> list[dict]:
             continue
         outbound = _outbound_tag(rule)
         domains, ips = _xray_matchers(rule.match)
-        if rule.match.get("any") is True:
+        if rule.match.get("any") is True or rule.match.get("type") == "any":
             compiled.append({"type": "field", "network": "tcp,udp", "outboundTag": outbound, "_rule": rule.id})
             continue
         if domains:
@@ -136,6 +174,8 @@ def compile_xray_rules(rules: list[RuleView]) -> list[dict]:
         if ips:
             compiled.append({"type": "field", "ip": ips, "outboundTag": outbound, "_rule": rule.id})
         preset_id = rule.match.get("preset")
+        if not preset_id and rule.match.get("type") == "preset":
+            preset_id = rule.match.get("value")
         if preset_id and preset_id in PRESETS:
             preset = PRESETS[preset_id]
             compiled.append(
@@ -178,6 +218,18 @@ def _xray_matchers(match: dict) -> tuple[list[str], list[str]]:
         ips.append(str(item))
     if "geoip" in match:
         ips.append(f"geoip:{match['geoip']}")
+    kind = match.get("type")
+    value = str(match.get("value") or "")
+    if kind == "domain" and value:
+        domains.append(f"full:{value}")
+    elif kind == "suffix" and value:
+        domains.append(f"domain:{value}")
+    elif kind == "ip" and value:
+        ips.append(value)
+    elif kind == "cidr" and value:
+        ips.append(value)
+    elif kind == "geo" and ":" in value:
+        ips.append(value) if value.startswith("geoip:") else domains.append(value)
     if "any_of" in match:
         for part in match["any_of"]:
             d, i = _xray_matchers(part)

@@ -87,8 +87,35 @@ export type Rule = {
   match: Record<string, unknown>;
   action: string;
   exit_id: string | null;
+  chain_id: string | null;
+  group_id: string | null;
   enabled: boolean;
   hits: number;
+};
+
+export type GroupMember = {
+  server_id: string;
+  name: string;
+  role: string;
+  demo: boolean;
+  weight: number;
+  standby: boolean;
+};
+
+export type ExitGroup = { id: string; name: string; members: GroupMember[] };
+
+export type ChainNode = { id: string; name: string; role: string; demo: boolean } | null;
+
+export type Chain = {
+  id: string;
+  name: string;
+  entry_id: string;
+  entry: ChainNode;
+  transit_ids: string[];
+  transits: ChainNode[];
+  exit_id: string | null;
+  exit: ChainNode;
+  group_id: string | null;
 };
 
 export type Overview = {

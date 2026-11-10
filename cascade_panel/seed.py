@@ -16,7 +16,21 @@ from sqlalchemy.orm import Session
 from .awg import generate_params, generate_psk, generate_wg_keypair
 from .crypto import vault
 from .lists import DEFAULT_SOURCES, now_iso
-from .models import AddressEntry, Balance, Client, Job, JobLine, ListSource, RoutingRule, Server, Setting
+from .models import (
+    AddressEntry,
+    Balance,
+    Chain,
+    ChainTransit,
+    Client,
+    ExitGroup,
+    ExitGroupMember,
+    Job,
+    JobLine,
+    ListSource,
+    RoutingRule,
+    Server,
+    Setting,
+)
 from .reality import generate_reality
 from .settings import AWG_SERVER_IP
 
@@ -165,8 +179,8 @@ def seed_if_empty(db: Session) -> None:
     clients_spec = [
         ("Роутер дом", "router", "awg", True, 52, f"{AWG_SERVER_IP.rsplit('.', 1)[0]}.14", "09.11.2026 14:32:18", [2, 3, 2, 4, 5, 4, 5, 3]),
         ("Xiaomi 15T Pro", "phone", "vless", True, 18, "", "09.11.2026 13:02:11", [1, 2, 1, 3, 2, 2, 1, 2]),
-        ("ПК NAKO", "pc", "awg", True, 31, f"{AWG_SERVER_IP.rsplit('.', 1)[0]}.15", "09.11.2026 12:40:02", [4, 3, 5, 4, 6, 5, 4, 3]),
-        ("Ноутбук Kali", "laptop", "awg", False, 4, f"{AWG_SERVER_IP.rsplit('.', 1)[0]}.16", "", [0, 1, 0, 0, 2, 0, 0, 0]),
+        ("Домашний ПК", "pc", "awg", True, 31, f"{AWG_SERVER_IP.rsplit('.', 1)[0]}.15", "09.11.2026 12:40:02", [4, 3, 5, 4, 6, 5, 4, 3]),
+        ("Ноутбук", "laptop", "awg", False, 4, f"{AWG_SERVER_IP.rsplit('.', 1)[0]}.16", "", [0, 1, 0, 0, 2, 0, 0, 0]),
     ]
     for name, kind, proto, online, gb, address, seen, series in clients_spec:
         keys = generate_wg_keypair()
@@ -235,6 +249,15 @@ def seed_if_empty(db: Session) -> None:
                 excluded=excluded,
             )
         )
+
+    group_id = str(uuid.uuid4())
+    db.add(ExitGroup(id=group_id, name="Основные выходы"))
+    db.add(ExitGroupMember(id=str(uuid.uuid4()), group_id=group_id, server_id=de_id, weight=50, standby=False))
+    db.add(ExitGroupMember(id=str(uuid.uuid4()), group_id=group_id, server_id=nl_id, weight=50, standby=False))
+    db.add(ExitGroupMember(id=str(uuid.uuid4()), group_id=group_id, server_id=fi_id, weight=0, standby=True))
+    chain_id = str(uuid.uuid4())
+    db.add(Chain(id=chain_id, name="Основной каскад", entry_id=entry_id, exit_id=None, group_id=group_id))
+    db.add(ChainTransit(id=str(uuid.uuid4()), chain_id=chain_id, server_id=transit_id, position=1))
 
     job = Job(id=str(uuid.uuid4()), server_id=entry_id, kind="install", status="done")
     db.add(job)

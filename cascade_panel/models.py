@@ -87,8 +87,48 @@ class RoutingRule(Base):
     match_json: Mapped[str] = mapped_column(Text)
     action: Mapped[str] = mapped_column(String(16))
     exit_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    chain_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    group_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     hits: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class ExitGroup(Base):
+    __tablename__ = "exit_groups"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+
+
+class ExitGroupMember(Base):
+    __tablename__ = "exit_group_members"
+    __table_args__ = (UniqueConstraint("group_id", "server_id", name="uq_group_server"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    group_id: Mapped[str] = mapped_column(String(36), index=True)
+    server_id: Mapped[str] = mapped_column(String(36), index=True)
+    weight: Mapped[int] = mapped_column(Integer, default=1)
+    standby: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Chain(Base):
+    __tablename__ = "chains"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    entry_id: Mapped[str] = mapped_column(String(36), index=True)
+    exit_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    group_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class ChainTransit(Base):
+    __tablename__ = "chain_transits"
+    __table_args__ = (UniqueConstraint("chain_id", "server_id", name="uq_chain_transit"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    chain_id: Mapped[str] = mapped_column(String(36), index=True)
+    server_id: Mapped[str] = mapped_column(String(36), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class Balance(Base):
@@ -124,6 +164,8 @@ class ListSource(Base):
     kind: Mapped[str] = mapped_column(String(32))
     action: Mapped[str] = mapped_column(String(16), default="cascade")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    interval_hours: Mapped[int] = mapped_column(Integer, default=24)
+    selector: Mapped[str] = mapped_column(String(64), default="")
     last_fetch: Mapped[str] = mapped_column(String(40), default="")
     last_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str] = mapped_column(Text, default="")

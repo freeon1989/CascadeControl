@@ -38,14 +38,18 @@ export function ClientsPage() {
       {rows && rows.length === 0 && <Banner text="Клиентов нет. Создайте первый — панель выпустит ключи AWG 3.1 или VLESS." />}
       <div className="grid gap-3 md:grid-cols-2">
         {rows?.map((client) => (
-          <button key={client.id} className="card p-4 text-left" onClick={() => setCurrent(client.id)}>
+          <div key={client.id} className="card cursor-pointer p-4 text-left" onClick={() => setCurrent(client.id)}>
             <div className="flex items-center justify-between">
               <div className="font-semibold">{client.name}</div>
               <span className={client.online ? "text-xs text-ok" : "text-xs text-mist"}>{client.online ? "Онлайн" : "Офлайн"}</span>
             </div>
             <div className="mt-3 text-sm text-mist">Протокол: {client.protocol === "awg" ? "AWG 3.1" : "VLESS Reality"}</div>
             <div className="text-sm text-mist">Трафик: {client.total_gb} ГБ</div>
-          </button>
+            <div className="mt-3 flex gap-3 text-xs">
+              <span className="text-teal">открыть</span>
+              <span className="text-rose" onClick={(event) => { event.stopPropagation(); if (confirm(`Удалить клиента «${client.name}»?`)) void api(`/api/clients/${client.id}`, { method: "DELETE" }).then(load); }}>удалить</span>
+            </div>
+          </div>
         ))}
       </div>
       {creating && <CreateClient onClose={() => { setCreating(false); void load(); }} />}

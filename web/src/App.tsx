@@ -3,6 +3,7 @@ import { useState } from "react";
 import { OverviewPage } from "./pages/Overview";
 import { ServersPage } from "./pages/Servers";
 import { RoutingPage } from "./pages/Routing";
+import { ChainsPage } from "./pages/Chains";
 import { ClientsPage } from "./pages/Clients";
 import { JournalPage } from "./pages/Journal";
 import { SettingsPage } from "./pages/Settings";
@@ -10,6 +11,7 @@ import { SettingsPage } from "./pages/Settings";
 const links = [
   ["/", "Обзор"],
   ["/servers", "Серверы"],
+  ["/chains", "Каскад"],
   ["/routing", "Маршрутизация"],
   ["/clients", "Клиенты"],
   ["/journal", "Журнал"],
@@ -61,6 +63,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<OverviewPage />} />
           <Route path="/servers" element={<ServersPage />} />
+          <Route path="/chains" element={<ChainsPage />} />
           <Route path="/routing" element={<RoutingPage />} />
           <Route path="/clients" element={<ClientsPage />} />
           <Route path="/journal" element={<JournalPage />} />

@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api, Client, ExportBundle, Server } from "../api";
+import { saveDownload } from "../saveFile";
 import { Banner, Page } from "./Overview";
 
 const kinds = [
@@ -147,14 +148,16 @@ function ClientDrawer({ id, onClose }: { id: string; onClose: () => void }) {
     setCopied("Скопировано");
   }
 
-  function download() {
-    const blob = new Blob([text], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = tab === "conf" ? `${data!.name}.conf` : `${data!.name}.txt`;
-    link.click();
-    URL.revokeObjectURL(url);
+  async function download() {
+    const filename = tab === "conf" ? `${data!.name}.conf` : tab === "vpn" ? `${data!.name}-vpn.txt` : `${data!.name}-sub.txt`;
+    const saved = await saveDownload(filename, text);
+    if (saved) setCopied(`Сохранено: ${saved}`);
+  }
+
+  async function downloadQr() {
+    if (!qr) return;
+    const saved = await saveDownload(`${data!.name}.png`, qr);
+    if (saved) setCopied(`Сохранено: ${saved}`);
   }
 
   return (
@@ -167,7 +170,12 @@ function ClientDrawer({ id, onClose }: { id: string; onClose: () => void }) {
           </div>
           <button onClick={onClose}>закрыть</button>
         </div>
-        {qr && <img alt="QR" src={qr} className="mx-auto mt-4 h-48 w-48 rounded-xl bg-white p-2" />}
+        {qr && (
+          <div className="mt-4 text-center">
+            <img alt="QR" src={qr} className="mx-auto h-48 w-48 rounded-xl bg-white p-2" />
+            <button className="mt-2 text-xs text-teal" onClick={() => void downloadQr()}>Сохранить QR</button>
+          </div>
+        )}
         <div className="mt-4 grid grid-cols-3 gap-1 rounded-xl bg-white/5 p-1 text-xs">
           <Tab active={tab === "conf"} onClick={() => setTab("conf")}>AmneziaWG .conf</Tab>
           <Tab active={tab === "vpn"} onClick={() => setTab("vpn")}>Amnezia vpn://</Tab>
@@ -184,7 +192,7 @@ function ClientDrawer({ id, onClose }: { id: string; onClose: () => void }) {
         <textarea readOnly className="mt-3 h-40 w-full rounded-xl border border-line bg-black/30 p-3 font-mono text-[11px]" value={text} />
         {tab === "sub" && exp.subscription_url && <div className="mt-2 break-all text-xs text-mist">{exp.subscription_url}</div>}
         <div className="mt-3 flex gap-2">
-          <button className="flex-1 rounded-lg border border-line py-2 text-sm" onClick={download}>Скачать</button>
+          <button className="flex-1 rounded-lg border border-line py-2 text-sm" onClick={() => void download()}>Скачать</button>
           <button className="flex-1 rounded-lg border border-line py-2 text-sm" onClick={() => void copy()}>Копировать</button>
         </div>
         {copied && <div className="mt-1 text-xs text-teal">{copied}</div>}

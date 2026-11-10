@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api, Check, flag, roleLabel, Server } from "../api";
+import { saveDownload } from "../saveFile";
 import { Banner, Page, Spark } from "./Overview";
 
 const roles = [
@@ -323,6 +324,8 @@ function PrecheckReport({
   onRecheck: () => void;
 }) {
   const checks = server?.precheck?.checks || [];
+  const [notice, setNotice] = useState("");
+  const report = checks.map((check) => `${check.title}: ${check.level}\n${check.detail}${check.hint ? `\n${check.hint}` : ""}`).join("\n\n");
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
       <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-line bg-[#0b1524] p-5">
@@ -338,7 +341,19 @@ function PrecheckReport({
           </div>
         )}
         <CheckList checks={checks} />
-        <button className="mt-4 w-full rounded-xl border border-line py-3 text-sm disabled:opacity-40" disabled={busy || !server} onClick={onRecheck}>
+        {notice && <div className="mt-3 text-xs text-teal">{notice}</div>}
+        <button
+          className="mt-4 w-full rounded-xl border border-line py-3 text-sm disabled:opacity-40"
+          disabled={!report}
+          onClick={() => {
+            void saveDownload(`precheck-${server?.name || "server"}.txt`, report).then((saved) => {
+              if (saved) setNotice(`Сохранено: ${saved}`);
+            });
+          }}
+        >
+          Скачать отчёт
+        </button>
+        <button className="mt-2 w-full rounded-xl border border-line py-3 text-sm disabled:opacity-40" disabled={busy || !server} onClick={onRecheck}>
           {busy ? "Проверяю…" : "Повторить проверку"}
         </button>
       </div>

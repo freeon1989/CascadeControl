@@ -9,6 +9,8 @@ const titles: Record<string, string> = {
   precheck: "Проверка",
   remove: "Удаление",
   update: "Обновление",
+  alert: "Предупреждение",
+  "dns-log": "Журнал сайтов",
 };
 
 export function JournalPage() {

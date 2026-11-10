@@ -6,11 +6,13 @@ import { RoutingPage } from "./pages/Routing";
 import { ChainsPage } from "./pages/Chains";
 import { ClientsPage } from "./pages/Clients";
 import { JournalPage } from "./pages/Journal";
+import { MonitorPage } from "./pages/Monitor";
 import { SettingsPage } from "./pages/Settings";
 
 const links = [
   ["/", "Обзор"],
   ["/servers", "Серверы"],
+  ["/monitor", "Мониторинг"],
   ["/chains", "Каскад"],
   ["/routing", "Маршрутизация"],
   ["/clients", "Клиенты"],
@@ -63,6 +65,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<OverviewPage />} />
           <Route path="/servers" element={<ServersPage />} />
+          <Route path="/monitor" element={<MonitorPage />} />
           <Route path="/chains" element={<ChainsPage />} />
           <Route path="/routing" element={<RoutingPage />} />
           <Route path="/clients" element={<ClientsPage />} />

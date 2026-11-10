@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -197,6 +197,34 @@ class JobLine(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     job: Mapped[Job] = relationship(back_populates="lines")
+
+
+class MetricSample(Base):
+    __tablename__ = "metric_samples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[int] = mapped_column(Integer, index=True)
+    server_id: Mapped[str] = mapped_column(String(36), index=True)
+    cpu: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mem_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    disk_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_rx: Mapped[int] = mapped_column(Integer, default=0)
+    net_tx: Mapped[int] = mapped_column(Integer, default=0)
+    peers_online: Mapped[int] = mapped_column(Integer, default=0)
+    ssh_ok: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class DnsHit(Base):
+    __tablename__ = "dns_hits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[int] = mapped_column(Integer, index=True)
+    server_id: Mapped[str] = mapped_column(String(36), index=True)
+    client_name: Mapped[str] = mapped_column(String(80), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    domain: Mapped[str] = mapped_column(String(255), default="")
+    site: Mapped[str] = mapped_column(String(255), default="")
+    qtype: Mapped[str] = mapped_column(String(16), default="")
 
 
 class Setting(Base):

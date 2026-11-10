@@ -34,11 +34,13 @@ from .models import (
     Balance,
     Chain,
     Client,
+    DnsHit,
     ExitGroup,
     ExitGroupMember,
     Job,
     JobLine,
     ListSource,
+    MetricSample,
     RoutingRule,
     Server,
     Setting,
@@ -492,9 +494,356 @@ def refresh_status(server_id: str) -> Server:
                 merged["client_spark"] = (list(merged.get("client_spark") or []) + [online_now])[-16:]
                 merged["traffic_spark"] = (list(merged.get("traffic_spark") or []) + [total_now])[-16:]
                 merged["clients_online"] = online_now
+        _store_observation(db, server, remote, previous, merged, role)
         server.stats_json = json.dumps(merged, ensure_ascii=False)
         server.status = "online" if remote is not None else "offline"
     return server
+
+
+def _store_observation(db: Session, server: Server, remote: dict | None, previous: dict, merged: dict, role: str) -> None:
+    """Пишет историю, сайты и предупреждения. Демо-узлы сюда не попадают."""
+    from .observe import (
+        CPU_ALERT,
+        DNS_NOTES,
+        MEM_ALERT,
+        classify_sites,
+        fresh_lines,
+        logging_drift,
+        parse_containers,
+        parse_dns_log,
+        parse_xray_access,
+        protocol_status,
+        root_domain,
+    )
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    observe = dict(previous.get("observe") or {})
+    alerts = dict(observe.get("alerts") or {})
+    messages: list[str] = []
+    ssh_ok = remote is not None
+    was_up = alerts.get("was_up")
+    if was_up is True and not ssh_ok:
+        messages.append(f"{server.name}: сервер недоступен")
+    elif was_up is False and ssh_ok:
+        messages.append(f"{server.name}: сервер снова доступен")
+    alerts["was_up"] = ssh_ok
+
+    cpu = remote.get("cpu") if remote else None
+    mem_pct = remote.get("mem_pct") if remote else None
+    if ssh_ok and isinstance(cpu, (int, float)):
+        if cpu >= CPU_ALERT and not alerts.get("cpu"):
+            messages.append(f"{server.name}: высокая загрузка CPU {cpu:.0f}%")
+            alerts["cpu"] = True
+        elif cpu < CPU_ALERT - 10 and alerts.get("cpu"):
+            messages.append(f"{server.name}: CPU в норме ({cpu:.0f}%)")
+            alerts["cpu"] = False
+    if ssh_ok and isinstance(mem_pct, (int, float)):
+        if mem_pct >= MEM_ALERT and not alerts.get("mem"):
+            messages.append(f"{server.name}: память занята на {mem_pct:.0f}%")
+            alerts["mem"] = True
+        elif mem_pct < MEM_ALERT - 10 and alerts.get("mem"):
+            messages.append(f"{server.name}: память в норме ({mem_pct:.0f}%)")
+            alerts["mem"] = False
+
+    containers: list[dict] = []
+    if remote and isinstance(remote.get("containers"), list):
+        containers = parse_containers("\n".join(str(line) for line in remote["containers"]))
+        if "containers" in observe:
+            previous_up = {item["name"]: item["up"] for item in observe.get("containers") or []}
+            for item in containers:
+                if item["name"] in previous_up and previous_up[item["name"]] != item["up"]:
+                    state = "запущен" if item["up"] else "остановлен"
+                    messages.append(f"{server.name}: контейнер {item['name']} {state}")
+        observe["containers"] = containers
+
+    peers_online = int(merged.get("clients_online") or 0)
+    db.add(
+        MetricSample(
+            ts=now,
+            server_id=server.id,
+            cpu=float(cpu) if isinstance(cpu, (int, float)) else None,
+            mem_pct=float(mem_pct) if isinstance(mem_pct, (int, float)) else None,
+            disk_pct=float(remote["disk_pct"]) if remote and isinstance(remote.get("disk_pct"), (int, float)) else None,
+            net_rx=int(remote.get("net_rx") or 0) if remote else 0,
+            net_tx=int(remote.get("net_tx") or 0) if remote else 0,
+            peers_online=peers_online,
+            ssh_ok=ssh_ok,
+        )
+    )
+    db.query(MetricSample).filter(MetricSample.server_id == server.id, MetricSample.ts < now - 7 * 86400).delete()
+
+    probe = (remote or {}).get("dns_probe") if isinstance((remote or {}).get("dns_probe"), dict) else {}
+    xray = (remote or {}).get("xray_access") if isinstance((remote or {}).get("xray_access"), dict) else {}
+    entries = []
+    if remote:
+        entries = parse_dns_log(str(probe.get("text") or "")) + parse_xray_access(str(xray.get("text") or ""))
+        fresh = fresh_lines(entries, observe.get("dns_cursor"))
+        if entries:
+            observe["dns_cursor"] = entries[-1]["line"]
+        clients = list(db.scalars(select(Client).where(Client.server_id == server.id)).all())
+        by_ip = {client.address: client.name for client in clients if client.address}
+        for item in fresh:
+            stamp = int(item["ts"] or now)
+            db.add(
+                DnsHit(
+                    ts=stamp,
+                    server_id=server.id,
+                    client_name=by_ip.get(item["ip"], item["ip"]),
+                    ip=item["ip"],
+                    domain=item["domain"],
+                    site=root_domain(item["domain"]),
+                    qtype=item.get("qtype") or "",
+                )
+            )
+    has_dns = bool(probe.get("has_container"))
+    mode = "unbound" if has_dns else "xray" if role in ENTRY_ROLES else "none"
+    status = classify_sites(
+        role=role,
+        has_dns_container=has_dns,
+        container_up=bool(probe.get("container_up")),
+        log_queries=str(probe.get("log_queries") or "missing"),
+        dns_error=str(probe.get("error") or ""),
+        xray_enabled=bool(xray.get("enabled")),
+        xray_error=str(xray.get("error") or ""),
+        parsed=len(entries),
+    ) if remote else str(observe.get("dns_status") or "no_container")
+    retention = int(observe.get("retention_hours") or 24)
+    db.query(DnsHit).filter(DnsHit.server_id == server.id, DnsHit.ts < now - retention * 3600).delete()
+    if status == "empty" and db.query(DnsHit).filter(DnsHit.server_id == server.id, DnsHit.ts >= now - retention * 3600).count():
+        status = "ok"
+    observe.update(
+        {
+            "alerts": alerts,
+            "dns_status": status,
+            "dns_note": DNS_NOTES.get(status, ""),
+            "dns_mode": mode,
+            "dns_drift": logging_drift(bool(observe.get("wanted")), status, mode),
+            "disk_free": remote.get("disk_free") if remote else observe.get("disk_free"),
+            "mem_pct": mem_pct,
+            "disk_pct": remote.get("disk_pct") if remote else observe.get("disk_pct"),
+            "protocols": protocol_status(containers, merged.get("live") or _live_from_merged(merged)),
+            "retention_hours": retention,
+            "cap_mb": int(observe.get("cap_mb") or 50),
+        }
+    )
+    merged["observe"] = observe
+    for message in messages:
+        _alert_job(db, server.id, message)
+
+
+def _live_from_merged(merged: dict) -> dict:
+    return {
+        "awg": merged.get("awg"),
+        "xray": merged.get("xray"),
+        "agent": merged.get("agent"),
+        "docker": merged.get("docker"),
+    }
+
+
+def _alert_job(db: Session, server_id: str, message: str) -> None:
+    job_id = str(uuid.uuid4())
+    db.add(Job(id=job_id, server_id=server_id, kind="alert", status="done", finished_at=datetime.now(timezone.utc)))
+    db.add(JobLine(job_id=job_id, step="alert", level="warning", message=redact(message)[:500]))
+
+
+def monitor_board(db: Session) -> dict:
+    servers = list(db.scalars(select(Server).order_by(Server.created_at)).all())
+    cards = []
+    lines = []
+    for server in servers:
+        stats = _stats(server)
+        observe = stats.get("observe") or {}
+        online = sum(1 for client in server.clients if client.online) if server.clients else int(stats.get("clients_online") or 0)
+        status = server.status
+        cards.append(
+            {
+                "id": server.id,
+                "name": server.name,
+                "role": server.role,
+                "host": server.host,
+                "status": status,
+                "cpu": stats.get("cpu"),
+                "ram": stats.get("ram") or "",
+                "disk": stats.get("disk") or "",
+                "uptime": stats.get("uptime") or "",
+                "ping_ms": stats.get("ping_ms"),
+                "clients_online": online,
+                "dns_status": observe.get("dns_status") or "no_container",
+                "checked_at": stats.get("checked_at") or "",
+            }
+        )
+        from .observe import summary_line
+
+        queries = db.query(DnsHit).filter(DnsHit.server_id == server.id).count()
+        lines.append(summary_line(server.name, status, stats.get("cpu") if isinstance(stats.get("cpu"), (int, float)) else None, online, queries))
+    return {"servers": cards, "summary": lines}
+
+
+def monitor_detail(db: Session, server_id: str, hours: int = 24) -> dict:
+    from .observe import DNS_NOTES, bucketize
+
+    server = db.get(Server, server_id)
+    if server is None:
+        raise ValueError("узел не найден")
+    hours = min(48, max(1, int(hours)))
+    now = int(datetime.now(timezone.utc).timestamp())
+    since = now - hours * 3600
+    stats = _stats(server)
+    observe = stats.get("observe") or {}
+    samples = list(
+        db.scalars(
+            select(MetricSample).where(MetricSample.server_id == server.id, MetricSample.ts >= since).order_by(MetricSample.ts)
+        ).all()
+    )
+    buckets = 24
+    cpu = bucketize([(row.ts, row.cpu) for row in samples], since, now, buckets)
+    mem = bucketize([(row.ts, row.mem_pct) for row in samples], since, now, buckets)
+    net_out: list[tuple[float, float]] = []
+    net_in: list[tuple[float, float]] = []
+    for prev, row in zip(samples, samples[1:]):
+        dt = row.ts - prev.ts
+        if dt <= 0 or not row.ssh_ok:
+            continue
+        net_out.append((row.ts, max(0, row.net_tx - prev.net_tx)))
+        net_in.append((row.ts, max(0, row.net_rx - prev.net_rx)))
+    hits = list(db.scalars(select(DnsHit).where(DnsHit.server_id == server.id, DnsHit.ts >= since)).all())
+    top: dict[str, int] = {}
+    per: dict[str, dict[str, int]] = {}
+    for hit in hits:
+        top[hit.site] = top.get(hit.site, 0) + 1
+        bucket = per.setdefault(hit.client_name or hit.ip, {})
+        bucket[hit.site] = bucket.get(hit.site, 0) + 1
+    top_sites = [{"site": site, "n": count} for site, count in sorted(top.items(), key=lambda item: -item[1])[:12]]
+    per_client = []
+    for name, sites in per.items():
+        ordered = [{"site": site, "n": count} for site, count in sorted(sites.items(), key=lambda item: -item[1])[:8]]
+        per_client.append({"client": name, "total": sum(item["n"] for item in ordered), "top": ordered})
+    per_client.sort(key=lambda item: -item["total"])
+    clients = [client for client in server.clients]
+    clients.sort(key=lambda client: -(client.rx_bytes + client.tx_bytes))
+    status = observe.get("dns_status") or "no_container"
+    return {
+        "id": server.id,
+        "name": server.name,
+        "role": server.role,
+        "status": server.status,
+        "cpu": stats.get("cpu"),
+        "ram": stats.get("ram") or "",
+        "disk": stats.get("disk") or "",
+        "uptime": stats.get("uptime") or "",
+        "ping_ms": stats.get("ping_ms"),
+        "disk_free": observe.get("disk_free"),
+        "containers": observe.get("containers") or [],
+        "protocols": observe.get("protocols") or [],
+        "series": {
+            "cpu": cpu,
+            "mem": mem,
+            "net_out": bucketize(net_out, since, now, buckets, "sum"),
+            "net_in": bucketize(net_in, since, now, buckets, "sum"),
+            "clients": bucketize([(row.ts, row.peers_online) for row in samples], since, now, buckets, "max"),
+        },
+        "top_clients": [
+            {
+                "id": client.id,
+                "name": client.name,
+                "online": client.online,
+                "address": client.address,
+                "rx_bytes": client.rx_bytes,
+                "tx_bytes": client.tx_bytes,
+                "total_bytes": client.rx_bytes + client.tx_bytes,
+                "last_seen": client.last_seen,
+                "traffic": json.loads(client.traffic_json or "[]"),
+            }
+            for client in clients[:12]
+        ],
+        "dns": {
+            "status": status,
+            "note": observe.get("dns_note") or DNS_NOTES.get(status, ""),
+            "mode": observe.get("dns_mode") or ("xray" if role_is_entry(server.role) else "none"),
+            "drift": bool(observe.get("dns_drift")),
+            "wanted": bool(observe.get("wanted")),
+            "queries": len(hits),
+            "top": top_sites,
+            "per_client": per_client,
+            "retention_hours": int(observe.get("retention_hours") or 24),
+            "cap_mb": int(observe.get("cap_mb") or 50),
+        },
+    }
+
+
+def role_is_entry(role: str) -> bool:
+    return role in ENTRY_ROLES
+
+
+def start_dns_log_job(server_id: str, enable: bool, retention_hours: int, cap_mb: int) -> str:
+    if retention_hours < 1 or retention_hours > 168:
+        raise ValueError("срок хранения: от 1 до 168 часов")
+    if cap_mb < 5 or cap_mb > 500:
+        raise ValueError("потолок журнала: от 5 до 500 МБ")
+    job_id = str(uuid.uuid4())
+    with session() as db:
+        server = db.get(Server, server_id)
+        if server is None:
+            raise ValueError("узел не найден")
+        if server.demo:
+            raise ValueError("демо-узел не меняется")
+        db.add(Job(id=job_id, server_id=server_id, kind="dns-log", status="running"))
+
+    def worker() -> None:
+        try:
+            _dns_log_worker(job_id, server_id, enable, retention_hours, cap_mb)
+        except Exception as exc:  # noqa: BLE001
+            _log(job_id, "dns", f"{exc.__class__.__name__}: {exc}", "error")
+            _close_job(job_id, "error")
+
+    threading.Thread(target=worker, name="cascade-dns-log", daemon=True).start()
+    return job_id
+
+
+def _close_job(job_id: str, status: str) -> None:
+    with session() as db:
+        job = db.get(Job, job_id)
+        if job:
+            job.status = status
+            job.finished_at = datetime.now(timezone.utc)
+
+
+def _dns_log_worker(job_id: str, server_id: str, enable: bool, retention_hours: int, cap_mb: int) -> None:
+    from .observe import apply_dns_logging
+
+    action = "включаю" if enable else "выключаю"
+    _log(job_id, "dns", f"{action} журнал сайтов, хранение {retention_hours} ч, потолок {cap_mb} МБ")
+    with session() as db:
+        server = db.get(Server, server_id)
+        if server is None:
+            raise ValueError("узел не найден")
+        role = server.role
+        disk_free = (_stats(server).get("observe") or {}).get("disk_free")
+        ssh_cm = connect(server, timeout=25)
+    with ssh_cm as ssh:
+        lines = apply_dns_logging(
+            ssh,
+            enable=enable,
+            role=role,
+            retention_hours=retention_hours,
+            cap_mb=cap_mb,
+            disk_free=int(disk_free) if isinstance(disk_free, int) else None,
+        )
+    for line in lines:
+        _log(job_id, "dns", line)
+    with session() as db:
+        server = db.get(Server, server_id)
+        if server:
+            stats = _stats(server)
+            observe = dict(stats.get("observe") or {})
+            observe["wanted"] = enable
+            observe["retention_hours"] = retention_hours
+            observe["cap_mb"] = cap_mb
+            observe["dns_drift"] = False
+            stats["observe"] = observe
+            server.stats_json = json.dumps(stats, ensure_ascii=False)
+    _log(job_id, "dns", "готово")
+    _close_job(job_id, "done")
 
 
 def refresh_all_status() -> int:

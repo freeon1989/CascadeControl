@@ -416,6 +416,120 @@ if xray_bin:
     if status == 0 and text.strip().startswith("{"):
         xray_stats = text.strip()[:8000]
 
+def tail_file(path, limit=50000):
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - limit))
+            return handle.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+
+def mem_disk():
+    mem_pct = None
+    try:
+        info = {}
+        for line in open("/proc/meminfo", encoding="utf-8", errors="replace"):
+            if ":" not in line:
+                continue
+            key, rest = line.split(":", 1)
+            info[key] = int(rest.strip().split()[0])
+        total = info.get("MemTotal") or 0
+        avail = info.get("MemAvailable", info.get("MemFree", 0))
+        if total > 0:
+            mem_pct = round(100.0 * max(0, total - avail) / total, 1)
+    except (OSError, ValueError):
+        mem_pct = None
+    disk_pct = disk_free = disk_total = None
+    try:
+        st = os.statvfs("/")
+        disk_total = st.f_blocks * st.f_frsize
+        disk_free = st.f_bavail * st.f_frsize
+        if disk_total > 0:
+            disk_pct = round(100.0 * (disk_total - disk_free) / disk_total, 1)
+    except OSError:
+        pass
+    return mem_pct, disk_pct, disk_free, disk_total
+
+def net_bytes():
+    rx = tx = 0
+    try:
+        for line in open("/proc/net/dev", encoding="utf-8", errors="replace"):
+            if ":" not in line:
+                continue
+            name, rest = line.split(":", 1)
+            if name.strip() == "lo":
+                continue
+            parts = rest.split()
+            if len(parts) >= 9:
+                rx += int(parts[0])
+                tx += int(parts[8])
+    except (OSError, ValueError):
+        return None, None
+    return rx, tx
+
+def observe_extra(container_lines):
+    names = []
+    for line in container_lines:
+        names.append(line.split("|", 1)[0])
+    dns = {"has_container": "amnezia-dns" in names, "container_up": False, "log_queries": "missing", "text": "", "error": ""}
+    for line in container_lines:
+        if line.startswith("amnezia-dns|"):
+            dns["container_up"] = line.split("|", 2)[1].lower().startswith("up")
+    if dns["has_container"] and dns["container_up"]:
+        status, text = run(prefix + ["docker", "exec", "amnezia-dns", "sh", "-c",
+            "grep -E '^[[:space:]]*log-queries:' /opt/unbound/etc/unbound/unbound.conf || true"], timeout=12)
+        if status != 0 and not text.strip():
+            dns["error"] = "unreadable"
+        elif "yes" in text:
+            dns["log_queries"] = "yes"
+        elif "no" in text:
+            dns["log_queries"] = "no"
+        status, text = run(prefix + ["docker", "exec", "amnezia-dns", "sh", "-c",
+            "tail -c 80000 /opt/unbound/etc/unbound/unbound.log 2>/dev/null; "
+            "for f in /opt/unbound/etc/unbound/log-archive/unbound-*.log; do [ -f \"$f\" ] && tail -c 20000 \"$f\"; done; "
+            "tail -c 40000 /opt/adguardhome/work/data/querylog.json 2>/dev/null; "
+            "tail -c 20000 /var/log/unbound/unbound.log 2>/dev/null; true"], timeout=20)
+        if status != 0 and not (text or "").strip():
+            dns["error"] = dns["error"] or "unreadable"
+        dns["text"] = (text or "")[-120000:]
+    xray = {"enabled": False, "text": "", "error": ""}
+    cfg_path = "/opt/cascade/xray/config.json"
+    if os.path.exists(cfg_path):
+        try:
+            cfg = json.load(open(cfg_path, encoding="utf-8"))
+            xray["enabled"] = bool((cfg.get("log") or {}).get("access"))
+        except (OSError, ValueError):
+            xray["error"] = "unreadable"
+    chunks = []
+    for path in [ "/opt/cascade/xray/access.log" ]:
+        if os.path.exists(path):
+            xray["enabled"] = True
+            chunk = tail_file(path)
+            if chunk is None:
+                xray["error"] = "unreadable"
+            elif chunk:
+                chunks.append(chunk)
+    archive = "/opt/cascade/xray/log-archive"
+    if os.path.isdir(archive):
+        for name in sorted(os.listdir(archive)):
+            if not name.startswith("access-"):
+                continue
+            chunk = tail_file(os.path.join(archive, name), 20000)
+            if chunk:
+                chunks.append(chunk)
+    xray["text"] = "\n".join(chunks)[-120000:]
+    return dns, xray
+
+container_lines = []
+status, text = run(prefix + ["docker", "ps", "-a", "--format", "{{.Names}}|{{.Status}}|{{.Image}}"], timeout=12)
+if status == 0:
+    container_lines = [line for line in text.splitlines() if line.strip()]
+mem_pct, disk_pct, disk_free, disk_total = mem_disk()
+net_rx, net_tx = net_bytes()
+dns_probe, xray_access = observe_extra(container_lines)
+
 payload = {
     "cpu": cpu_percent(),
     "ram": ram_text(),
@@ -427,6 +541,15 @@ payload = {
     "awg": awg,
     "awg_dump": dump,
     "xray_stats": xray_stats,
+    "containers": container_lines,
+    "mem_pct": mem_pct,
+    "disk_pct": disk_pct,
+    "disk_free": disk_free,
+    "disk_total": disk_total,
+    "net_rx": net_rx,
+    "net_tx": net_tx,
+    "dns_probe": dns_probe,
+    "xray_access": xray_access,
 }
 if not dump.strip() and agent_peers is not None:
     payload["peers"] = agent_peers

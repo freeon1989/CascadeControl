@@ -69,6 +69,7 @@ export function SettingsPage() {
                 <input className="mt-1 w-full rounded-lg border border-line bg-ink px-3 py-2" value={dns.dns2} onChange={(e) => setDns({ ...dns, dns2: e.target.value })} />
               </label>
             </div>
+            <p className="mt-3 text-xs text-mist">Эти адреса попадают в новые конфиги клиентов. Уже выданный файл на телефоне не меняется, пока его не скачают снова.</p>
             <button className="mt-3 rounded-lg bg-tide px-4 py-2" onClick={() => api("/api/settings/dns", { method: "PUT", body: JSON.stringify(dns) }).then(() => setMessage("DNS сохранён"))}>Сохранить DNS</button>
             {data.demo && (
               <button className="mt-3 block text-sm text-rose" onClick={() => api("/api/settings/clear-demo", { method: "POST" }).then(() => { setMessage("Демо-данные удалены"); void load(); })}>

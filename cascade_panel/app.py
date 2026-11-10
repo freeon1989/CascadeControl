@@ -16,6 +16,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+
+class DnsLogIn(BaseModel):
+    enable: bool
+    confirm: bool = False
+    retention_hours: int = 24
+    cap_mb: int = 50
+
 from . import __version__
 from .editor import (
     chain_is_used,
@@ -41,6 +48,9 @@ from .service import (
     create_server,
     reconfigure_worker,
     refresh_status,
+    monitor_board,
+    monitor_detail,
+    start_dns_log_job,
     update_server,
     decide,
     export_client,
@@ -320,6 +330,29 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
                 return server_view(fresh)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/monitor")
+    def get_monitor() -> dict:
+        with session() as db:
+            return monitor_board(db)
+
+    @app.get("/api/monitor/{server_id}")
+    def get_monitor_server(server_id: str, hours: int = 24) -> dict:
+        try:
+            with session() as db:
+                return monitor_detail(db, server_id, hours)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/servers/{server_id}/dns-log")
+    def post_dns_log(server_id: str, body: DnsLogIn) -> dict:
+        if not body.confirm:
+            raise HTTPException(400, "нужно подтверждение: журнал хранит домены клиентов")
+        try:
+            job_id = start_dns_log_job(server_id, body.enable, body.retention_hours, body.cap_mb)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"job_id": job_id}
 
     @app.post("/api/servers/{server_id}/precheck")
     def post_precheck(server_id: str) -> dict:

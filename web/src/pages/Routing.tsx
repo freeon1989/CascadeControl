@@ -26,7 +26,7 @@ const matchChoices = [
   ["suffix", "Сайт и все поддомены", "google.com"],
   ["ip", "Один IP", "1.1.1.1"],
   ["cidr", "Сеть", "10.0.0.0/8"],
-  ["geo", "Страна или гео-список", "geosite:ru"],
+  ["geo", "Страна или гео-список", "geosite:category-ru"],
   ["list", "Готовый список", "antifilter-domains"],
   ["preset", "Пресет сервиса", "youtube"],
   ["any", "Всё, что не совпало выше", ""],

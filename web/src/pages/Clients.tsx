@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
-import { api, Client, ExportBundle } from "../api";
+import { api, Client, ExportBundle, Server } from "../api";
 import { Banner, Page } from "./Overview";
 
 const kinds = [
@@ -14,10 +14,14 @@ export function ClientsPage() {
   const [current, setCurrent] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [sync, setSync] = useState<string>("");
 
   async function load() {
     try {
       setRows(await api<Client[]>("/api/clients"));
+      const servers = await api<Server[]>("/api/servers");
+      const entry = servers.find((item) => item.role === "entry");
+      setSync(entry?.live?.awg_sync?.message || "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "ошибка");
     }
@@ -34,6 +38,7 @@ export function ClientsPage() {
       extra={<button className="rounded-full bg-tide px-4 py-2 text-sm font-semibold" onClick={() => setCreating(true)}>+ Новый клиент</button>}
     >
       {error && <Banner text={error} />}
+      {sync && <Banner text={`Синхронизация входа: ${sync}`} />}
       {!rows && <Banner text="Загрузка клиентов…" />}
       {rows && rows.length === 0 && <Banner text="Клиентов нет. Создайте первый — панель выпустит ключи AWG 3.1 или VLESS." />}
       <div className="grid gap-3 md:grid-cols-2">

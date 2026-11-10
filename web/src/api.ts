@@ -53,6 +53,7 @@ export type Server = {
     agent: string;
     xray: string;
     awg: { up: boolean; handshakes: number } | null;
+    awg_sync: { ok: boolean; at: string; message: string } | null;
   };
   share: number | null;
   speed_mbps: number | null;

@@ -269,6 +269,11 @@ def test_install_and_remove_scripts_refuse_foreign_containers():
     assert "journalctl -u cascade-xray -n 50" in script
     assert "is-active --quiet cascade-xray" in script
     assert "docker-27.5.1.tgz" in script
+    assert "geosite.dat" in script
+    assert "XRAY_LOCATION_ASSET=/opt/cascade/bin" in script
+    assert "--entrypoint bash" in script
+    assert "--log-driver none" not in script
+    assert "is-active cascade-agent" in script
     assert script.index("https://get.docker.com") < script.rindex("docker.io")
     remove = render_remove_script()
     assert "amnezia-" not in remove

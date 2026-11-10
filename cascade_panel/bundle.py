@@ -41,6 +41,9 @@ if [ ! -f "$CONF" ]; then
   echo "нет $CONF" >&2
   exit 1
 fi
+if ! command -v nft >/dev/null 2>&1 && command -v apk >/dev/null 2>&1; then
+  apk add --no-cache nftables
+fi
 awg-quick down "$CONF" >/dev/null 2>&1 || true
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
@@ -69,7 +72,7 @@ RestartSec=2
 LimitNOFILE=1048576
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-Environment=XRAY_LOCATION_ASSET=/opt/cascade/xray
+Environment=XRAY_LOCATION_ASSET=/opt/cascade/bin
 
 [Install]
 WantedBy=multi-user.target
@@ -176,19 +179,27 @@ def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool, xray
     if awg:
         quoted = shlex.quote(awg_name)
         lines += [
-            f"log обновляю контейнер {awg_name}",
-            f"if $SUDO docker ps -a --format '{{{{.Names}}}}' | grep -qx {quoted}; then $SUDO docker rm -f {quoted}; fi",
-            "log образ AmneziaWG",
-            f"$SUDO docker pull {AWG_IMAGE}",
-            "log запускаю AWG на хостовой сети, интерфейс cawg0",
-            "$SUDO docker run -d --name "
+            "if $SUDO modprobe amneziawg >/dev/null 2>&1 && command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then",
+            "  log ядро умеет AmneziaWG, поднимаю cawg0 на хосте без контейнера",
+            "  $SUDO bash -c 'set -e; CONF=/opt/cascade/awg/cawg0.conf; awg-quick down \"$CONF\" >/dev/null 2>&1 || true; sysctl -w net.ipv4.ip_forward=1 >/dev/null; sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null; sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null; awg-quick up \"$CONF\"; nft -f /opt/cascade/awg/tproxy.nft; ip rule del fwmark 0x63 table 100 >/dev/null 2>&1 || true; ip rule add fwmark 0x63 table 100; ip route replace local 0.0.0.0/0 dev lo table 100'",
+            "else",
+            f"  log модуль ядра не найден, контейнер {awg_name}",
+            f"  if $SUDO docker ps -a --format '{{{{.Names}}}}' | grep -qx {quoted}; then $SUDO docker rm -f {quoted}; fi",
+            "  log образ AmneziaWG",
+            f"  $SUDO docker pull {AWG_IMAGE}",
+            "  log запускаю AWG на хостовой сети, интерфейс cawg0",
+            "  $SUDO docker run -d --name "
             + awg_name
             + " --network host --restart always --privileged --cap-add NET_ADMIN --cap-add SYS_MODULE"
-            + " --log-driver none -v /lib/modules:/lib/modules:ro"
+            + " --log-driver local --log-opt max-size=10m --log-opt max-file=3"
+            + " -v /lib/modules:/lib/modules:ro"
             + " -v /opt/cascade:/opt/cascade"
             + " -v /opt/cascade/awg:/opt/amnezia/awg"
-            + " -v /opt/cascade/awg/start.sh:/opt/amnezia/start.sh:ro "
-            + AWG_IMAGE,
+            + " -v /opt/cascade/awg/start.sh:/opt/amnezia/start.sh:ro"
+            + " --entrypoint bash "
+            + AWG_IMAGE
+            + " /opt/amnezia/start.sh",
+            "fi",
         ]
     if xray:
         lines += [
@@ -198,11 +209,12 @@ def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool, xray
             + f"https://github.com/XTLS/Xray-core/releases/download/{XRAY_VERSION}/Xray-linux-64.zip",
             "unzip -o \"$tmp/xray.zip\" -d \"$tmp/xray\" >/dev/null",
             "$SUDO install -m 0755 \"$tmp/xray/xray\" /opt/cascade/bin/xray",
+            "$SUDO install -m 0644 \"$tmp/xray/geoip.dat\" \"$tmp/xray/geosite.dat\" /opt/cascade/bin/",
             "rm -rf \"$tmp\"",
             "$SUDO cp /opt/cascade/xray/cascade-xray.service /etc/systemd/system/cascade-xray.service",
             "$SUDO systemctl daemon-reload",
             "log проверяю конфиг Xray",
-            "if ! $SUDO /opt/cascade/bin/xray run -test -config /opt/cascade/xray/config.json; then",
+            "if ! $SUDO env XRAY_LOCATION_ASSET=/opt/cascade/bin /opt/cascade/bin/xray run -test -config /opt/cascade/xray/config.json; then",
             "  log конфиг Xray не прошёл проверку",
             "  $SUDO journalctl -u cascade-xray -n 50 --no-pager || true",
             "  exit 1",
@@ -226,13 +238,24 @@ def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool, xray
         lines += [
             "if [ ! -f /opt/cascade/bin/cascade-agent ]; then",
             "  log агент ещё не загружен панелью",
-            "else",
-            "  $SUDO install -m 0755 /opt/cascade/bin/cascade-agent /usr/local/bin/cascade-agent",
-            "  $SUDO cp /opt/cascade/agent/cascade-agent.service /etc/systemd/system/cascade-agent.service",
-            "  $SUDO systemctl daemon-reload",
-            "  $SUDO systemctl enable --now cascade-agent",
-            "  $SUDO systemctl restart cascade-agent",
-            "  log агент включён",
+            "  exit 1",
+            "fi",
+            "if [ ! -f /opt/cascade/agent/cascade-agent.service ]; then",
+            "  log нет файла службы агента",
+            "  exit 1",
+            "fi",
+            "$SUDO install -m 0755 /opt/cascade/bin/cascade-agent /usr/local/bin/cascade-agent",
+            "$SUDO cp /opt/cascade/agent/cascade-agent.service /etc/systemd/system/cascade-agent.service",
+            "$SUDO systemctl daemon-reload",
+            "$SUDO systemctl enable cascade-agent",
+            "$SUDO systemctl restart cascade-agent",
+            "sleep 1",
+            "state=$($SUDO systemctl is-active cascade-agent || true)",
+            "log агент: $state",
+            "if [ \"$state\" != active ]; then",
+            "  $SUDO systemctl status cascade-agent --no-pager || true",
+            "  $SUDO journalctl -u cascade-agent -n 50 --no-pager || true",
+            "  exit 1",
             "fi",
         ]
     lines += [
@@ -246,6 +269,29 @@ def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool, xray
     if "amnezia-" in script and "docker rm" in script:
         raise RuntimeError("скрипт установки собрался с удалением контейнера Amnezia")
     return script
+
+
+def render_awg_sync_script() -> str:
+    """Подменяет пиры без awg-quick down, чтобы остальные клиенты не отвалились."""
+    name = assert_own_container("cascade-awg")
+    quoted = shlex.quote(name)
+    return f"""#!/bin/bash
+set -u
+log() {{ echo "CASCADE_LOG $*"; }}
+if [ "$(id -u)" -ne 0 ]; then SUDO="sudo -n"; else SUDO=; fi
+if $SUDO ip link show cawg0 >/dev/null 2>&1 && command -v awg >/dev/null 2>&1 && ! $SUDO docker ps --format '{{{{.Names}}}}' | grep -qx {quoted}; then
+  $SUDO bash -c 'awg syncconf cawg0 <(awg-quick strip /opt/cascade/awg/cawg0.conf)'
+  log пиры применены на хосте, интерфейс не перезапускался
+  exit 0
+fi
+if $SUDO docker ps --format '{{{{.Names}}}}' | grep -qx {quoted}; then
+  $SUDO docker exec {quoted} bash -c 'awg syncconf cawg0 <(awg-quick strip /opt/amnezia/awg/cawg0.conf)'
+  log пиры применены в контейнере, интерфейс не перезапускался
+  exit 0
+fi
+log интерфейс cawg0 ещё не поднят, конфиг только записан на диск
+exit 0
+"""
 
 
 def render_remove_script() -> str:

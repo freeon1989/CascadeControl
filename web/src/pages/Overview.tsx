@@ -70,7 +70,7 @@ export function OverviewPage() {
           <div className="card border-amber/40 p-4">
             <div className="text-xs text-amber">Напрямую</div>
             <div className="mt-2 text-3xl font-semibold">{data.direct_share}%</div>
-            <div className="mt-1 text-sm text-mist">Интернет с адреса входа: банки, госуслуги, geosite:ru</div>
+            <div className="mt-1 text-sm text-mist">Интернет с адреса входа: банки, госуслуги, geosite:category-ru</div>
           </div>
           <div className="card border-teal/40 p-4">
             <div className="text-xs text-teal">Каскад {data.transit ? `через ${data.transit.name}` : ""}</div>

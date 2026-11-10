@@ -208,7 +208,7 @@ def seed_if_empty(db: Session) -> None:
         )
 
     rules = [
-        ("geosite:ru, geoip:ru", {"any_of": [{"geosite": "ru"}, {"geoip": "ru"}]}, "direct", None, 12842),
+        ("geosite:category-ru, geoip:ru", {"any_of": [{"geosite": "category-ru"}, {"geoip": "ru"}]}, "direct", None, 12842),
         ("Банки и Госуслуги", {"preset": "banks-gov"}, "direct", None, 3671),
         ("youtube.com, googlevideo.com", {"preset": "youtube"}, "cascade", None, 8905),
         ("openai.com, gemini.google.com", {"any_of": [{"preset": "openai"}, {"preset": "google-ai"}]}, "exit", nl_id, 2134),

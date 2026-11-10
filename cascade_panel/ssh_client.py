@@ -73,24 +73,29 @@ class ParamikoSession:
     def run(self, command: str, on_line: Callable[[str], None]) -> int:
         if self._client is None:
             raise SSHError("сессия закрыта")
-        _stdin, stdout, stderr = self._client.exec_command(command, timeout=self.timeout)
-        channel = stdout.channel
-        while not channel.exit_status_ready() or channel.recv_ready() or channel.recv_stderr_ready():
-            if channel.recv_ready():
-                for line in stdout.readline().splitlines():
-                    on_line(line)
-            if channel.recv_stderr_ready():
-                for line in stderr.readline().splitlines():
-                    on_line(line)
-            if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+        chan = self._client.get_transport().open_session()
+        chan.settimeout(self.timeout)
+        # LC_ALL не даёт удалённой стороне перекодировать журнал в cp866.
+        chan.exec_command("export LC_ALL=C.UTF-8 LANG=C.UTF-8; " + command)
+        stdout = chan.makefile("rb")
+        stderr = chan.makefile_stderr("rb")
+        while not chan.exit_status_ready() or chan.recv_ready() or chan.recv_stderr_ready():
+            if chan.recv_ready():
+                for line in _utf8_text(stdout.readline()).splitlines():
+                    if line:
+                        on_line(line)
+            if chan.recv_stderr_ready():
+                for line in _utf8_text(stderr.readline()).splitlines():
+                    if line:
+                        on_line(line)
+            if chan.exit_status_ready() and not chan.recv_ready() and not chan.recv_stderr_ready():
                 break
-        # дочитываем хвост
-        rest = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace")
+        rest = _utf8_text(stdout.read())
+        err = _utf8_text(stderr.read())
         for line in (rest + ("\n" + err if err else "")).splitlines():
             if line:
                 on_line(line)
-        return channel.recv_exit_status()
+        return chan.recv_exit_status()
 
     def write_file(self, path: str, content: bytes, mode: int = 0o600) -> None:
         if self._client is None:
@@ -118,6 +123,32 @@ class ParamikoSession:
                 return remote.read()
         finally:
             sftp.close()
+
+
+def _utf8_text(chunk) -> str:
+    """Журнал SSH всегда UTF-8. Если байты уже прочитали как cp866, чиним строку."""
+    if isinstance(chunk, bytes):
+        text = chunk.decode("utf-8", errors="replace")
+    elif isinstance(chunk, str):
+        text = chunk
+    else:
+        text = str(chunk)
+    return _repair_cp866(text)
+
+
+def _repair_cp866(text: str) -> str:
+    try:
+        raw = text.encode("cp866")
+        fixed = raw.decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+    def cyr(value: str) -> int:
+        return sum(1 for char in value if "\u0400" <= char <= "\u04ff")
+
+    if cyr(fixed) > cyr(text):
+        return fixed
+    return text
 
 
 def _connect_password_interactive(target: SSHTarget, timeout: float):
@@ -208,6 +239,12 @@ class FakeSession:
             on_line("CASCADE_LOG xray запущен")
             on_line("CASCADE_LOG агент включён")
             on_line("CASCADE_LOG проверка портов: ok")
+            return 0
+        if "sync.sh" in command or "syncconf" in command:
+            on_line("CASCADE_LOG пиры применены в контейнере, интерфейс не перезапускался")
+            return 0
+        if "cascade-xray" in command:
+            on_line("CASCADE_LOG xray перечитал конфиг")
             return 0
         if "cascade-agent" in command and "status" in command:
             on_line('{"healthy_exits":[]}')

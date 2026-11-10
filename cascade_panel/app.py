@@ -32,6 +32,7 @@ from .detect import probe_domain
 from .models import AddressEntry, Balance, Client, Job, JobLine, ListSource, RoutingRule, Server, Setting
 from .seed import seed_if_empty
 from .service import (
+    _active_entry,
     apply_preset_rule,
     chain_summary,
     clear_demo,
@@ -52,6 +53,7 @@ from .service import (
     apply_quick_setup,
     autowire_cascade,
     deploy_all_worker,
+    sync_entry_clients,
     overview,
     precheck_worker,
     record_detection,
@@ -240,6 +242,9 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
     with session() as db:
         if (do_seed if do_seed is not None else seed_enabled()):
             seed_if_empty(db)
+        from .editor import migrate_geo_rules
+
+        migrate_geo_rules(db)
 
     @app.get("/api/health")
     def health() -> dict:
@@ -427,7 +432,11 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             with session() as db:
                 client = create_client(db, body.model_dump())
                 entry = db.get(Server, client.server_id) if client.server_id else None
-                return client_view(client, entry.name if entry else "")
+                view = client_view(client, entry.name if entry else "")
+                entry_id = entry.id if entry else None
+            if entry_id:
+                view["sync_job"] = start_job("awg-sync", entry_id, sync_entry_clients)
+            return view
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -449,7 +458,10 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             if client is None:
                 raise HTTPException(404, "клиент не найден")
             reissue_client(db, client)
-            return {"ok": True}
+            entry = _active_entry(db)
+            entry_id = entry.id if entry else None
+        job_id = start_job("awg-sync", entry_id, sync_entry_clients) if entry_id else None
+        return {"ok": True, "sync_job": job_id}
 
     @app.delete("/api/clients/{client_id}")
     def delete_client(client_id: str) -> dict:
@@ -458,7 +470,10 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             if client is None:
                 raise HTTPException(404, "клиент не найден")
             db.delete(client)
-        return {"ok": True}
+            entry = _active_entry(db)
+            entry_id = entry.id if entry else None
+        job_id = start_job("awg-sync", entry_id, sync_entry_clients) if entry_id else None
+        return {"ok": True, "sync_job": job_id}
 
     @app.get("/api/clients/{client_id}/conf")
     def download_conf(client_id: str):

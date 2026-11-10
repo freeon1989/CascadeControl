@@ -12,6 +12,50 @@ from .models import Chain, ChainTransit, ExitGroup, ExitGroupMember, RoutingRule
 from .presets import PRESETS
 
 MATCH_TYPES = ("domain", "suffix", "ip", "cidr", "list", "preset", "geo", "any")
+
+# В geosite.dat v2fly нет кода ru. Рабочая категория — category-ru. geoip:ru есть.
+GEO_VALUE_ALIASES = {"geosite:ru": "geosite:category-ru"}
+GEOSITE_CODE_ALIASES = {"ru": "category-ru"}
+
+
+def canonical_geo(value: str) -> str:
+    text = value.strip()
+    return GEO_VALUE_ALIASES.get(text, text)
+
+
+def rewrite_geo_node(node):
+    if isinstance(node, dict):
+        rewritten = {}
+        for key, value in node.items():
+            if key == "geosite" and isinstance(value, str):
+                rewritten[key] = GEOSITE_CODE_ALIASES.get(value, value)
+            elif key == "value" and isinstance(value, str):
+                rewritten[key] = canonical_geo(value)
+            else:
+                rewritten[key] = rewrite_geo_node(value)
+        return rewritten
+    if isinstance(node, list):
+        return [rewrite_geo_node(item) for item in node]
+    return node
+
+
+def migrate_geo_rules(db) -> int:
+    """geosite:ru в сохранённых правилах заменяется на geosite:category-ru."""
+    import json
+
+    from .models import RoutingRule
+
+    changed = 0
+    for rule in db.scalars(select(RoutingRule)).all():
+        try:
+            match = json.loads(rule.match_json or "{}")
+        except json.JSONDecodeError:
+            continue
+        updated = rewrite_geo_node(match)
+        if updated != match:
+            rule.match_json = json.dumps(updated, ensure_ascii=False)
+            changed += 1
+    return changed
 ACTIONS = ("direct", "cascade", "chain", "group", "exit", "block")
 ENTRY_ROLES = {"entry", "standby_entry"}
 EXIT_ROLES = {"exit", "standby_exit"}
@@ -20,7 +64,7 @@ EXIT_ROLES = {"exit", "standby_exit"}
 def validate_match(match: dict) -> dict:
     if "type" not in match:
         if any(key in match for key in ("any", "domain", "domains", "geosite", "geoip", "cidr", "cidrs", "preset", "any_of")):
-            return match
+            return rewrite_geo_node(match)
         raise ValueError("укажите тип совпадения")
     kind = str(match.get("type") or "")
     value = str(match.get("value") or "").strip()
@@ -53,8 +97,9 @@ def validate_match(match: dict) -> dict:
             raise ValueError("нет такого пресета")
         return {"type": "preset", "value": value}
     if kind == "geo":
+        value = canonical_geo(value)
         if not (value.startswith("geosite:") or value.startswith("geoip:")) or len(value.split(":", 1)[1]) < 2:
-            raise ValueError("гео пишется как geosite:ru или geoip:ru")
+            raise ValueError("гео пишется как geosite:category-ru или geoip:ru")
         return {"type": "geo", "value": value}
     raise ValueError("неизвестный тип совпадения")
 

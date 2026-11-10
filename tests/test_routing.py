@@ -4,7 +4,7 @@ from cascade_panel.routing import Catalog, RuleView, compile_xray_rules, evaluat
 
 def rules():
     return [
-        RuleView("1", 1, True, "ru", {"any_of": [{"geosite": "ru"}, {"geoip": "ru"}]}, "direct"),
+        RuleView("1", 1, True, "ru", {"any_of": [{"geosite": "category-ru"}, {"geoip": "ru"}]}, "direct"),
         RuleView("2", 2, False, "off", {"domains": ["off.example"]}, "block"),
         RuleView("3", 3, True, "yt", {"preset": "youtube"}, "cascade"),
         RuleView("4", 4, True, "ai", {"any_of": [{"preset": "openai"}, {"preset": "google-ai"}]}, "exit", "nl"),
@@ -14,7 +14,7 @@ def rules():
 
 
 def test_first_match_wins_and_disabled_rules_are_skipped():
-    catalog = Catalog(geosite={"ru": {"gosuslugi.ru", "yandex.ru"}}, geoip={})
+    catalog = Catalog(geosite={"category-ru": {"gosuslugi.ru", "yandex.ru"}}, geoip={})
     decision = evaluate(rules(), "mail.yandex.ru", None, catalog)
     assert decision.action == "direct"
     assert decision.rule_id == "1"
@@ -30,6 +30,6 @@ def test_first_match_wins_and_disabled_rules_are_skipped():
 def test_preset_covers_subdomains_and_xray_compile_order():
     assert domain_in_preset("banks-gov", "lk.gosuslugi.ru")
     compiled = compile_xray_rules(rules())
-    assert compiled[0]["domain"][0] == "geosite:ru"
+    assert compiled[0]["domain"][0] == "geosite:category-ru"
     assert compiled[-1]["network"] == "tcp,udp"
     assert any(item.get("outboundTag") == "block" for item in compiled)

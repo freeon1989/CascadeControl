@@ -191,6 +191,7 @@ def server_view(server: Server) -> dict:
             "agent": stats.get("agent") or "",
             "xray": stats.get("xray") or "",
             "awg": stats.get("awg"),
+            "awg_sync": stats.get("awg_sync"),
         },
         "share": stats.get("share"),
         "speed_mbps": stats.get("speed_mbps"),
@@ -580,6 +581,9 @@ def precheck_worker(job_id: str, server_id: str | None) -> None:
 
 
 def assemble(db: Session):
+    from .editor import migrate_geo_rules
+
+    migrate_geo_rules(db)
     servers = list(db.scalars(select(Server)).all())
     entry = next((s for s in servers if s.role == "entry"), None)
     if entry is None:
@@ -802,10 +806,26 @@ def deploy_all_worker(job_id: str, _server_id: str | None) -> None:
         _log(job_id, "deploy", "нет узлов для установки", "warn")
         _finish(job_id, "done", None)
         return
+    failed: list[str] = []
     for server_id, name, role in plan:
         _log(job_id, "deploy", f"узел {name}, роль {role}")
-        install_worker(job_id, server_id, finish=False)
-        _log(job_id, "deploy", f"{name} установлен")
+        try:
+            install_worker(job_id, server_id, finish=False)
+        except Exception as exc:  # noqa: BLE001
+            failed.append(name)
+            _log(job_id, "deploy", f"{name}: ошибка, перехожу к следующему узлу. {exc}", "error")
+            with session() as db:
+                server = db.get(Server, server_id)
+                if server:
+                    server.status = "error"
+                    server.last_error = redact(str(exc))[:500]
+            continue
+        _log(job_id, "deploy", f"{name}: готово")
+    if failed:
+        summary = "не установлены: " + ", ".join(failed)
+        _log(job_id, "deploy", summary, "error")
+        _finish(job_id, "error", None, summary)
+        return
     _finish(job_id, "done", None)
 
 
@@ -1010,6 +1030,77 @@ def subscription_for_token(db: Session, token: str) -> str | None:
         return None
     payload = export_client(db, client)
     return payload["subscription"]
+
+
+def sync_entry_clients(job_id: str, server_id: str | None) -> None:
+    """Пишет cawg0.conf и конфиг Xray на вход и применяет пиры без сброса интерфейса."""
+    from .bundle import render_awg_sync_script
+
+    with session() as db:
+        entry = db.get(Server, server_id) if server_id else _active_entry(db)
+        if entry is None:
+            raise ValueError("нет входа")
+        entry_id = entry.id
+        demo = entry.demo
+        if not demo:
+            files = files_for(db, entry)
+        else:
+            files = {}
+    if demo:
+        _log(job_id, "sync", "демо-вход, на сервер ничего не отправлено", "warn")
+        _store_sync(entry_id, False, "демо-вход, конфиг только в базе")
+        _finish(job_id, "done", entry_id)
+        return
+    conf = files.get("/opt/cascade/awg/cawg0.conf")
+    xray = files.get("/opt/cascade/xray/config.json")
+    try:
+        with session() as db:
+            entry = db.get(Server, entry_id)
+            assert entry
+            ssh_cm = connect(entry, timeout=20)
+        with ssh_cm as ssh:
+            if conf:
+                _log(job_id, "sync", "записываю cawg0.conf")
+                ssh.write_file("/opt/cascade/awg/cawg0.conf", conf.encode("utf-8"), 0o600)
+                ssh.write_file("/opt/cascade/awg/sync.sh", render_awg_sync_script().encode("utf-8"), 0o700)
+                code = ssh.run("bash /opt/cascade/awg/sync.sh", lambda line: _log(job_id, "sync", line))
+                if code != 0:
+                    raise SSHError(f"обновление пиров завершилось с кодом {code}")
+            if xray:
+                _log(job_id, "sync", "записываю конфиг Xray")
+                ssh.write_file("/opt/cascade/xray/config.json", xray.encode("utf-8"), 0o600)
+                code = ssh.run(
+                    "if [ \"$(id -u)\" -eq 0 ]; then systemctl reload-or-restart cascade-xray; else sudo -n systemctl reload-or-restart cascade-xray; fi",
+                    lambda line: _log(job_id, "sync", line),
+                )
+                if code != 0:
+                    raise SSHError("Xray не перечитал конфиг")
+    except Exception as exc:  # noqa: BLE001
+        message = f"конфиг в базе, на сервер не отправлен: {exc}"
+        _store_sync(entry_id, False, message)
+        raise
+    _store_sync(entry_id, True, "пиры и Xray обновлены без удаления сервера")
+    with session() as db:
+        job = db.get(Job, job_id)
+        if job:
+            job.status = "done"
+            job.finished_at = datetime.now(timezone.utc)
+
+
+def _store_sync(server_id: str, ok: bool, message: str) -> None:
+    with session() as db:
+        server = db.get(Server, server_id)
+        if server is None:
+            return
+        stats = _stats(server)
+        stats["awg_sync"] = {
+            "ok": ok,
+            "at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "message": redact(message)[:300],
+        }
+        server.stats_json = json.dumps(stats, ensure_ascii=False)
+        if not ok:
+            server.config_dirty = True
 
 
 def reissue_client(db: Session, client: Client) -> None:
@@ -1300,7 +1391,7 @@ def apply_quick_setup(db: Session) -> dict:
     from .editor import validate_action, validate_match
 
     wanted = [
-        ("Российские сайты", {"type": "geo", "value": "geosite:ru"}, "direct"),
+        ("Российские сайты", {"any_of": [{"geosite": "category-ru"}, {"geoip": "ru"}]}, "direct"),
         ("Всё остальное", {"type": "any", "value": ""}, "cascade"),
     ]
     rules = list(db.scalars(select(RoutingRule).order_by(RoutingRule.position)).all())

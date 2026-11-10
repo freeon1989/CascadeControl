@@ -7,6 +7,8 @@ export function ChainsPage() {
   const [chains, setChains] = useState<Chain[]>([]);
   const [groups, setGroups] = useState<ExitGroup[]>([]);
   const [error, setError] = useState("");
+  const [log, setLog] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
   const [chainForm, setChainForm] = useState<null | { id: string; name: string; entry_id: string; transit_ids: string[]; exit_id: string; group_id: string; mode: "exit" | "group" }>(null);
   const [groupForm, setGroupForm] = useState<null | { id: string; name: string; members: { server_id: string; weight: number; standby: boolean }[] }>(null);
 
@@ -68,9 +70,59 @@ export function ChainsPage() {
     }
   }
 
+  async function autowire() {
+    setError("");
+    try {
+      await api("/api/cascade/autowire", { method: "POST" });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ошибка");
+    }
+  }
+
+  async function deployAll() {
+    if (!confirm("Развернуть всё? Сначала выходы, потом транзит, затем вход. Серверы из списка не удаляются.")) return;
+    setBusy(true);
+    setError("");
+    setLog(["запуск"]);
+    try {
+      const job = await api<{ job_id: string }>("/api/cascade/deploy", { method: "POST" });
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const body = await api<{ status: string; lines: { message: string }[] }>(`/api/jobs/${job.job_id}`);
+        setLog(body.lines.map((line) => line.message));
+        if (body.status !== "running") {
+          if (body.status !== "done") setError("Установка остановилась, журнал ниже");
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ошибка");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <Page title="Каскад" subtitle="Один вход, необязательные транзиты и выход или группа выходов. Демо-узлы можно включать в схему, но по SSH они не ставятся.">
+    <Page
+      title="Каскад"
+      subtitle="Один вход, необязательные транзиты и группа выходов. Демо-узлы можно включать в схему, но по SSH они не ставятся."
+      extra={
+        <div className="flex flex-wrap gap-2">
+          <button className="rounded-full border border-teal px-4 py-2 text-sm text-teal" onClick={() => void autowire()}>Собрать автоматически</button>
+          <button className="rounded-full bg-tide px-4 py-2 text-sm font-semibold disabled:opacity-40" disabled={busy} onClick={() => void deployAll()}>Развернуть всё</button>
+        </div>
+      }
+    >
       {error && <Banner text={error} />}
+      {chains.length === 0 && (
+        <div className="card mb-4 p-4 text-sm">
+          <p>Цепочки ещё нет. Если вход и выходы уже добавлены, «Собрать автоматически» создаст группу из всех выходов и одну цепочку.</p>
+          <button className="mt-3 rounded-lg bg-tide px-3 py-2 text-sm" onClick={() => void autowire()}>Собрать автоматически</button>
+        </div>
+      )}
+      {log.length > 0 && <pre className="card mb-4 max-h-64 overflow-auto p-3 text-xs text-teal">{log.join("\n")}</pre>}
       <div className="grid gap-4 xl:grid-cols-2">
         <section className="card p-4">
           <div className="mb-3 flex items-center justify-between">

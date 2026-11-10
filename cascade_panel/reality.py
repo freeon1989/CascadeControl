@@ -1,7 +1,8 @@
 """Ключи и ссылка VLESS + Reality.
 
-Публичный ключ — raw X25519 (32 байта) в стандартном base64, тот формат,
-который печатает ``xray x25519`` и который ждёт realitySettings.
+Xray (в том числе v26.10.31) ждёт ключи x25519 в base64.RawURLEncoding:
+32 байта, 43 символа, без ``=``, алфавит ``A-Za-z0-9-_``.
+Стандартный base64 с ``+``, ``/`` и ``=`` конфиг Reality отклоняет.
 Short ID — 8 байт hex, как ``openssl rand -hex 8`` в configure_container.sh Amnezia.
 """
 
@@ -37,6 +38,26 @@ class RealityMaterial:
         return cls(**{k: data[k] for k in cls.__dataclass_fields__})
 
 
+def reality_key_b64(raw: bytes) -> str:
+    """32 байта x25519 в base64.RawURLEncoding, как ``xray x25519``."""
+    if len(raw) != 32:
+        raise ValueError("ключ Reality должен быть 32 байта")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def normalize_reality_key(value: str) -> str:
+    """Приводит стандартный base64 или уже rawurl к rawurl без padding."""
+    text = (value or "").strip()
+    if not text:
+        return text
+    padded = text + ("=" * ((4 - len(text) % 4) % 4))
+    try:
+        raw = base64.urlsafe_b64decode(padded)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("ключ Reality не разобран") from exc
+    return reality_key_b64(raw)
+
+
 def generate_reality(
     port: int,
     sni: str = "www.googletagmanager.com",
@@ -51,8 +72,8 @@ def generate_reality(
     pub = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     return RealityMaterial(
         uuid=str(uuid.uuid4()),
-        private_key=base64.b64encode(priv).decode("ascii"),
-        public_key=base64.b64encode(pub).decode("ascii"),
+        private_key=reality_key_b64(priv),
+        public_key=reality_key_b64(pub),
         short_id=os.urandom(8).hex(),
         sni=sni,
         dest=f"{sni}:443",

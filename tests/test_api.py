@@ -174,6 +174,89 @@ def test_fake_ssh_pipeline_keeps_amnezia_containers(client):
         set_connector(None)
 
 
+def test_json_uses_utf8_charset(client):
+    health = client.get("/api/health")
+    assert "charset=utf-8" in health.headers["content-type"].lower()
+    missing = client.get("/api/no-such")
+    assert missing.status_code == 404
+    assert "charset=utf-8" in missing.headers["content-type"].lower()
+
+
+def test_old_precheck_text_is_recalculated_and_autowire(client):
+    from cascade_panel.db import session
+    from cascade_panel.models import Server
+
+    client.post("/api/settings/clear-demo")
+    created = []
+    for name, role in (("entry-1", "entry"), ("exit-a", "exit"), ("exit-b", "exit")):
+        response = client.post(
+            "/api/servers",
+            json={
+                "name": name,
+                "host": "203.0.113.10",
+                "ssh_port": 22,
+                "ssh_user": "root",
+                "auth_type": "password",
+                "secret": "secret",
+                "role": role,
+                "country": "DE",
+            },
+        )
+        assert response.status_code == 200, response.text
+        created.append(response.json())
+    chains = client.get("/api/chains").json()
+    groups = client.get("/api/groups").json()
+    assert len(chains) == 1
+    assert len(groups) == 1
+    assert len(groups[0]["members"]) == 2
+    entry = next(item for item in created if item["role"] == "entry")
+    stale = {
+        "ok": False,
+        "checks": [
+            {
+                "id": "os",
+                "title": "Система",
+                "level": "fail",
+                "detail": "Ubuntu 26.04 LTS: нужна Ubuntu 22.04/24.04 или Debian 12",
+            }
+        ],
+        "raw": {
+            "virt": "kvm",
+            "os_id": "ubuntu",
+            "os_version": "26.04",
+            "os_pretty": "Ubuntu 26.04 LTS",
+            "kernel": "7.0.0",
+            "disk_free_gb": 20,
+            "docker": False,
+            "port_443_tcp_free": True,
+            "used_ports": [22],
+            "containers": [],
+            "uid": 0,
+            "sudo_nopass": True,
+        },
+    }
+    with session() as db:
+        row = db.get(Server, entry["id"])
+        row.precheck_json = json.dumps(stale, ensure_ascii=False)
+        standard = __import__("base64").b64encode(bytes(range(32))).decode("ascii")
+        row.reality_public = standard
+    set_connector(lambda _server: FakeSession())
+    try:
+        job = client.post(f"/api/servers/{entry['id']}/install").json()
+        body = _wait(client, job["job_id"])
+        assert body["status"] == "done", body
+        joined = "\n".join(line["message"] for line in body["lines"])
+        assert "22.04/24.04" not in joined
+    finally:
+        set_connector(None)
+    with session() as db:
+        row = db.get(Server, entry["id"])
+        assert "=" not in row.reality_public
+        assert len(row.reality_public) == 43
+        report = json.loads(row.precheck_json)
+        assert report["ok"] is True
+
+
 def test_install_and_remove_scripts_refuse_foreign_containers():
     script = render_install_script(role="entry", awg=True, xray=True, agent=True)
     assert "cascade-awg" in script
@@ -182,6 +265,10 @@ def test_install_and_remove_scripts_refuse_foreign_containers():
     assert "https://get.docker.com" in script
     assert "dnf install" in script
     assert "firewall-cmd" in script
+    assert "xray run -test" in script
+    assert "journalctl -u cascade-xray -n 50" in script
+    assert "is-active --quiet cascade-xray" in script
+    assert "docker-27.5.1.tgz" in script
     assert script.index("https://get.docker.com") < script.rindex("docker.io")
     remove = render_remove_script()
     assert "amnezia-" not in remove

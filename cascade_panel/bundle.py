@@ -69,7 +69,6 @@ RestartSec=2
 LimitNOFILE=1048576
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
 Environment=XRAY_LOCATION_ASSET=/opt/cascade/xray
 
 [Install]
@@ -95,7 +94,7 @@ WantedBy=multi-user.target
 """
 
 
-def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool) -> str:
+def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool, xray_port: int = 443) -> str:
     """Скрипт установки. Удаляет только контейнеры cascade-*."""
     awg_name = assert_own_container("cascade-awg")
     lines = [
@@ -109,6 +108,11 @@ def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool) -> s
         "if command -v apt-get >/dev/null 2>&1; then",
         "  log пакеты Ubuntu/Debian через apt",
         "  $SUDO apt-get update -y || true",
+        "  if [ -f /etc/os-release ] && grep -q '^ID=ubuntu' /etc/os-release; then",
+        "    $SUDO apt-get install -y software-properties-common || true",
+        "    $SUDO add-apt-repository -y universe || true",
+        "    $SUDO apt-get update -y || true",
+        "  fi",
         "  $SUDO apt-get install -y nftables curl ca-certificates unzip || true",
         "  if ! command -v docker >/dev/null 2>&1; then",
         "    log ставлю docker: пакет docker.io, если его нет то get.docker.com",
@@ -141,6 +145,35 @@ def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool) -> s
         "$SUDO systemctl enable --now docker >/dev/null 2>&1 || true",
     ]
     if awg:
+        lines += [
+            "if ! command -v docker >/dev/null 2>&1; then",
+            "  log пакет docker не встал, качаю статический бинарник",
+            "  dtmp=$(mktemp -d)",
+            "  if curl -fsSL -o \"$dtmp/docker.tgz\" https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz; then",
+            "    tar -xzf \"$dtmp/docker.tgz\" -C \"$dtmp\"",
+            "    $SUDO install -m 0755 \"$dtmp/docker/docker\" \"$dtmp/docker/dockerd\" \"$dtmp/docker/containerd\" \"$dtmp/docker/containerd-shim-runc-v2\" \"$dtmp/docker/runc\" /usr/bin/",
+            "    $SUDO tee /etc/systemd/system/docker.service >/dev/null << 'UNIT'",
+            "[Unit]",
+            "Description=Docker",
+            "After=network-online.target",
+            "[Service]",
+            "ExecStart=/usr/bin/dockerd",
+            "Restart=always",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "UNIT",
+            "    $SUDO systemctl daemon-reload",
+            "    $SUDO systemctl enable --now docker",
+            "  fi",
+            "  rm -rf \"$dtmp\"",
+            "fi",
+            "if ! command -v docker >/dev/null 2>&1; then",
+            "  log Docker не установился, AmneziaWG на входе без него не запустить",
+            "  exit 1",
+            "fi",
+            "log docker готов",
+        ]
+    if awg:
         quoted = shlex.quote(awg_name)
         lines += [
             f"log обновляю контейнер {awg_name}",
@@ -168,9 +201,26 @@ def render_install_script(*, role: str, awg: bool, xray: bool, agent: bool) -> s
             "rm -rf \"$tmp\"",
             "$SUDO cp /opt/cascade/xray/cascade-xray.service /etc/systemd/system/cascade-xray.service",
             "$SUDO systemctl daemon-reload",
-            "$SUDO systemctl enable --now cascade-xray",
+            "log проверяю конфиг Xray",
+            "if ! $SUDO /opt/cascade/bin/xray run -test -config /opt/cascade/xray/config.json; then",
+            "  log конфиг Xray не прошёл проверку",
+            "  $SUDO journalctl -u cascade-xray -n 50 --no-pager || true",
+            "  exit 1",
+            "fi",
+            "$SUDO systemctl enable cascade-xray",
             "$SUDO systemctl restart cascade-xray",
-            "log xray перезапущен",
+            "sleep 1",
+            "if ! $SUDO systemctl is-active --quiet cascade-xray; then",
+            "  log служба cascade-xray не активна",
+            "  $SUDO journalctl -u cascade-xray -n 50 --no-pager || true",
+            "  exit 1",
+            "fi",
+            f"if command -v ss >/dev/null 2>&1 && ! ss -lntH | grep -Eq '[:.]{int(xray_port)}([^0-9]|$)'; then",
+            f"  log порт {int(xray_port)} не слушается",
+            "  $SUDO journalctl -u cascade-xray -n 50 --no-pager || true",
+            "  exit 1",
+            "fi",
+            f"log xray слушает {int(xray_port)}",
         ]
     if agent and role == "entry":
         lines += [

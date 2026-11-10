@@ -29,7 +29,20 @@ from .db import session
 from .detect import Probe, classify, classify_body
 from .hysteria import plan as hysteria_plan
 from .lists import fetch_text, now_iso, parse_cidr_list, parse_domain_list
-from .models import AddressEntry, Balance, Client, Job, JobLine, ListSource, RoutingRule, Server, Setting
+from .models import (
+    AddressEntry,
+    Balance,
+    Chain,
+    Client,
+    ExitGroup,
+    ExitGroupMember,
+    Job,
+    JobLine,
+    ListSource,
+    RoutingRule,
+    Server,
+    Setting,
+)
 from .presets import PRESETS, list_presets
 from .qr import png_data_url
 from .reality import RealityMaterial, generate_reality, subscription_body, vless_uri
@@ -73,7 +86,23 @@ def _store_params(server: Server, params: AwgParams) -> None:
     server.awg_params_json = json.dumps(dumped)
 
 
+def _persist_reality_keys(server: Server) -> None:
+    """Старый стандартный base64 в базе переписывается в rawurl, сервер не удаляется."""
+    from .reality import normalize_reality_key
+
+    if server.reality_public:
+        fixed = normalize_reality_key(server.reality_public)
+        if fixed != server.reality_public:
+            server.reality_public = fixed
+    if server.reality_private_enc:
+        plain = _box().decrypt(server.reality_private_enc)
+        fixed = normalize_reality_key(plain)
+        if fixed != plain:
+            server.reality_private_enc = _box().encrypt(fixed)
+
+
 def _material(server: Server) -> RealityMaterial:
+    _persist_reality_keys(server)
     return RealityMaterial(
         uuid=server.node_uuid,
         private_key=_box().decrypt(server.reality_private_enc),
@@ -300,6 +329,10 @@ def create_server(db: Session, payload: dict) -> Server:
     _issue_node_crypto(server)
     db.add(server)
     db.flush()
+    try:
+        autowire_cascade(db)
+    except ValueError:
+        pass
     return server
 
 
@@ -343,6 +376,10 @@ def update_server(db: Session, server: Server, payload: dict) -> Server:
         server.ssh_secret_enc = _box().encrypt(stored_secret)
     _ensure_crypto(server)
     server.config_dirty = True
+    try:
+        autowire_cascade(db)
+    except ValueError:
+        pass
     return server
 
 
@@ -693,25 +730,121 @@ def files_for(db: Session, server: Server) -> dict[str, str]:
         awg=want_awg,
         xray=want_xray,
         agent=server.role == "entry",
+        xray_port=server.reality_port or 443,
     )
     files["/opt/cascade/install.sh"] = script
     return files
 
 
-def install_worker(job_id: str, server_id: str | None) -> None:
+def _add_exit_member(db: Session, group_id: str, node: Server) -> None:
+    db.add(
+        ExitGroupMember(
+            id=str(uuid.uuid4()),
+            group_id=group_id,
+            server_id=node.id,
+            weight=0 if node.role == "standby_exit" else 50,
+            standby=node.role == "standby_exit",
+        )
+    )
+
+
+def autowire_cascade(db: Session) -> dict:
+    """Вход и все выходы собираются в группу и цепочку.
+
+    Если «Основной каскад» уже есть, новые выходы дописываются в его группу.
+    """
+    entry = db.scalar(select(Server).where(Server.role == "entry"))
+    exits = [row for row in db.scalars(select(Server)).all() if row.role in {"exit", "standby_exit"}]
+    if entry is None or not any(row.role == "exit" for row in exits):
+        raise ValueError("нужен один вход и хотя бы один выход")
+    chain = db.scalar(select(Chain).where(Chain.name == "Основной каскад"))
+    if chain is None and db.scalar(select(Chain).limit(1)) is not None:
+        return {"created": False}
+    if chain is not None and chain.group_id:
+        group = db.get(ExitGroup, chain.group_id)
+        if group is None or group.name != "Основные выходы":
+            return {"created": False}
+        present = {
+            row.server_id
+            for row in db.scalars(select(ExitGroupMember).where(ExitGroupMember.group_id == group.id)).all()
+        }
+        added = False
+        for node in exits:
+            if node.id not in present:
+                _add_exit_member(db, group.id, node)
+                added = True
+        return {"created": added, "chain_id": chain.id, "group_id": group.id}
+    group_id = str(uuid.uuid4())
+    db.add(ExitGroup(id=group_id, name="Основные выходы"))
+    for node in exits:
+        _add_exit_member(db, group_id, node)
+    chain_id = str(uuid.uuid4())
+    db.add(Chain(id=chain_id, name="Основной каскад", entry_id=entry.id, exit_id=None, group_id=group_id))
+    db.flush()
+    transits = [row.id for row in db.scalars(select(Server).where(Server.role == "transit")).all()]
+    from .editor import replace_transits
+
+    replace_transits(db, chain_id, transits)
+    return {"created": True, "chain_id": chain_id, "group_id": group_id}
+
+
+def deploy_order(servers: list[Server]) -> list[Server]:
+    rank = {"exit": 0, "standby_exit": 1, "transit": 2, "entry": 3, "standby_entry": 4}
+    return sorted((row for row in servers if not row.demo), key=lambda row: rank.get(row.role, 9))
+
+
+def deploy_all_worker(job_id: str, _server_id: str | None) -> None:
+    """Сначала выходы, затем транзиты, затем вход. Журнал один на всю установку."""
+    with session() as db:
+        ordered = deploy_order(list(db.scalars(select(Server)).all()))
+        plan = [(row.id, row.name, row.role) for row in ordered]
+    if not plan:
+        _log(job_id, "deploy", "нет узлов для установки", "warn")
+        _finish(job_id, "done", None)
+        return
+    for server_id, name, role in plan:
+        _log(job_id, "deploy", f"узел {name}, роль {role}")
+        install_worker(job_id, server_id, finish=False)
+        _log(job_id, "deploy", f"{name} установлен")
+    _finish(job_id, "done", None)
+
+
+def reevaluate_precheck(server_id: str) -> dict | None:
+    """Считает вердикт заново по сохранённым фактам и текущим правилам.
+
+    Старый текст проверки («нужна Ubuntu 22.04/24.04») больше не блокирует установку.
+    """
+    from .precheck import evaluate
+
+    with session() as db:
+        server = db.get(Server, server_id)
+        if server is None or not server.precheck_json:
+            return None
+        try:
+            stored = json.loads(server.precheck_json)
+        except json.JSONDecodeError:
+            return None
+        raw = stored.get("raw") if isinstance(stored, dict) else None
+        if not isinstance(raw, dict) or not raw:
+            return stored if isinstance(stored, dict) else None
+        fresh = evaluate(raw).to_json()
+        server.precheck_json = json.dumps(fresh, ensure_ascii=False)
+        return fresh
+
+
+def install_worker(job_id: str, server_id: str | None, finish: bool = True) -> None:
     assert server_id
+    report = reevaluate_precheck(server_id)
     with session() as db:
         server = db.get(Server, server_id)
         if server is None:
             raise ValueError("узел не найден")
-        if not server.precheck_json and not server.demo:
+        if report is None and not server.demo:
             raise ValueError("сначала выполните проверку")
-        if server.precheck_json:
-            report = json.loads(server.precheck_json)
-            if not report.get("ok", False) and not server.demo:
-                failed = [item for item in report.get("checks") or [] if item.get("level") == "fail"]
-                detail = "; ".join(f"{item.get('title')}: {item.get('detail')}" for item in failed)
-                raise ValueError("установка заблокирована: " + (detail or "предпроверка не пройдена"))
+        if report and not report.get("ok", False) and not server.demo:
+            failed = [item for item in report.get("checks") or [] if item.get("level") == "fail"]
+            detail = "; ".join(f"{item.get('title')}: {item.get('detail')}" for item in failed)
+            raise ValueError("установка заблокирована: " + (detail or "предпроверка не пройдена"))
         demo = server.demo
         files = None if demo else files_for(db, server)
         binary = None
@@ -744,7 +877,15 @@ def install_worker(job_id: str, server_id: str | None) -> None:
         code = ssh.run("bash /opt/cascade/install.sh", lambda line: _log(job_id, "install", line))
     if code != 0:
         raise SSHError(f"установка завершилась с кодом {code}")
-    _finish(job_id, "done", server_id)
+    if finish:
+        _finish(job_id, "done", server_id)
+    else:
+        with session() as db:
+            server = db.get(Server, server_id)
+            if server:
+                server.status = "online"
+                server.config_dirty = False
+                server.last_error = ""
 
 
 def reconfigure_worker(job_id: str, server_id: str | None) -> None:

@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -49,6 +50,8 @@ from .service import (
     set_preset_enabled,
     upsert_address,
     apply_quick_setup,
+    autowire_cascade,
+    deploy_all_worker,
     overview,
     precheck_worker,
     record_detection,
@@ -218,9 +221,22 @@ def _source_id(db, explicit: str, title: str) -> str:
     return candidate
 
 
+class UTF8JSONResponse(JSONResponse):
+    media_type = "application/json; charset=utf-8"
+
+
 def create_app(database: Path | None = None, do_seed: bool | None = None) -> FastAPI:
     init_db(database or db_path())
-    app = FastAPI(title="Cascade Control", version=__version__, docs_url="/api/docs")
+    app = FastAPI(
+        title="Cascade Control",
+        version=__version__,
+        docs_url="/api/docs",
+        default_response_class=UTF8JSONResponse,
+    )
+
+    @app.exception_handler(HTTPException)
+    async def utf8_http_error(_request, exc: HTTPException):
+        return UTF8JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     with session() as db:
         if (do_seed if do_seed is not None else seed_enabled()):
             seed_if_empty(db)
@@ -278,6 +294,10 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
                 _guard_role(db, body.role, server.id)
                 server.role = body.role
                 server.config_dirty = True
+                try:
+                    autowire_cascade(db)
+                except ValueError:
+                    pass
                 return server_view(server)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -648,6 +668,18 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
                 db.delete(member)
             db.delete(group)
         return {"ok": True}
+
+    @app.post("/api/cascade/autowire")
+    def post_autowire() -> dict:
+        try:
+            with session() as db:
+                return autowire_cascade(db)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/cascade/deploy")
+    def post_deploy() -> dict:
+        return {"job_id": start_job("deploy", None, deploy_all_worker)}
 
     @app.get("/api/chains")
     def get_chains() -> list:

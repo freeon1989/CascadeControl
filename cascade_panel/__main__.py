@@ -53,7 +53,10 @@ def _open_webview(url: str) -> bool:
         _say(f"Окно WebView2 не загрузилось ({exc.__class__.__name__}). Откройте панель в браузере: {url}")
         return False
     try:
-        webview.create_window("Cascade Control", url, width=1440, height=920)
+        from .desktop import SaveApi, configure_webview
+
+        configure_webview(webview)
+        webview.create_window("Cascade Control", url, width=1440, height=920, js_api=SaveApi())
         webview.start()
     except Exception as exc:  # noqa: BLE001
         _say(f"Окно WebView2 не открылось ({exc.__class__.__name__}: {exc}). Адрес панели: {url}")

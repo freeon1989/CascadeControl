@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api, Chain, ExitGroup, Server } from "../api";
+import { saveDownload } from "../saveFile";
 import { Banner, Page } from "./Overview";
 
 export function ChainsPage() {
@@ -122,7 +123,7 @@ export function ChainsPage() {
           <button className="mt-3 rounded-lg bg-tide px-3 py-2 text-sm" onClick={() => void autowire()}>Собрать автоматически</button>
         </div>
       )}
-      {log.length > 0 && <pre className="card mb-4 max-h-64 overflow-auto p-3 text-xs text-teal">{log.join("\n")}</pre>}
+      {log.length > 0 && <DeployLog lines={log} />}
       <div className="grid gap-4 xl:grid-cols-2">
         <section className="card p-4">
           <div className="mb-3 flex items-center justify-between">
@@ -226,5 +227,28 @@ export function ChainsPage() {
         </form>
       )}
     </Page>
+  );
+}
+
+function DeployLog({ lines }: { lines: string[] }) {
+  const [notice, setNotice] = useState("");
+  return (
+    <div className="card mb-4 p-3">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <span className="text-xs text-mist">Журнал развёртывания</span>
+        <button
+          className="text-xs text-teal"
+          onClick={() => {
+            void saveDownload("cascade-deploy.txt", lines.join("\n")).then((saved) => {
+              if (saved) setNotice(`Сохранено: ${saved}`);
+            });
+          }}
+        >
+          Скачать
+        </button>
+      </div>
+      {notice && <div className="mb-2 text-xs text-teal">{notice}</div>}
+      <pre className="max-h-64 overflow-auto text-xs text-teal">{lines.join("\n")}</pre>
+    </div>
   );
 }

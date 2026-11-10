@@ -152,7 +152,17 @@ def server_view(server: Server) -> dict:
         "hysteria2": hysteria_plan(),
         "cpu": stats.get("cpu"),
         "ram": stats.get("ram"),
+        "disk": stats.get("disk") or "",
+        "uptime": stats.get("uptime") or "",
         "ping_ms": stats.get("ping_ms"),
+        "checked_at": stats.get("checked_at") or "",
+        "live": {
+            "online": stats.get("online"),
+            "docker": stats.get("docker") or "",
+            "agent": stats.get("agent") or "",
+            "xray": stats.get("xray") or "",
+            "awg": stats.get("awg"),
+        },
         "share": stats.get("share"),
         "speed_mbps": stats.get("speed_mbps"),
         "spark": stats.get("spark") or [],
@@ -355,14 +365,92 @@ def _ensure_crypto(server: Server) -> None:
         _store_params(server, params)
 
 
-def connect(server: Server):
+def refresh_status(server_id: str) -> Server:
+    """Один опрос: TCP-пинг с панели и снимок по SSH. Демо-узел не трогает сеть."""
+    from .status import STATS_SCRIPT, parse_stats_output, tcp_ping
+
+    with session() as db:
+        server = db.get(Server, server_id)
+        if server is None:
+            raise ValueError("узел не найден")
+        demo = server.demo
+        host = server.host
+        port = server.ssh_port or 22
+        previous = _stats(server)
+    checked = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    if demo:
+        previous["checked_at"] = checked
+        previous["online"] = True
+        with session() as db:
+            server = db.get(Server, server_id)
+            assert server
+            server.stats_json = json.dumps(previous, ensure_ascii=False)
+            if server.status in {"", "unknown"}:
+                server.status = "online"
+        return server
+    ping = tcp_ping(host, port)
+    remote: dict | None = None
+    error = ""
+    try:
+        with session() as db:
+            server = db.get(Server, server_id)
+            assert server
+            ssh_cm = connect(server, timeout=12)
+        with ssh_cm as ssh:
+            ssh.write_file("/opt/cascade/stats.sh", STATS_SCRIPT.encode(), 0o700)
+            lines: list[str] = []
+            code = ssh.run("bash /opt/cascade/stats.sh", lambda line: lines.append(line))
+        if code != 0 and not any("CASCADE_STATS" in line for line in lines):
+            raise SSHError("скрипт статуса завершился с ошибкой")
+        remote = parse_stats_output("\n".join(lines))
+    except Exception as exc:  # noqa: BLE001
+        error = redact(str(exc))[:240]
+    spark = list(previous.get("spark") or [])
+    if remote and remote.get("cpu") is not None:
+        spark = (spark + [remote["cpu"]])[-16:]
+    merged = dict(previous)
+    merged.update(
+        {
+            "ping_ms": ping,
+            "checked_at": checked,
+            "online": remote is not None,
+            "spark": spark,
+            "error": "" if remote is not None else error or "SSH не ответил",
+        }
+    )
+    if remote:
+        for key in ("cpu", "ram", "disk", "uptime", "docker", "agent", "xray", "awg"):
+            if key in remote:
+                merged[key] = remote[key]
+    with session() as db:
+        server = db.get(Server, server_id)
+        assert server
+        server.stats_json = json.dumps(merged, ensure_ascii=False)
+        server.status = "online" if remote is not None else "offline"
+    return server
+
+
+def refresh_all_status() -> int:
+    with session() as db:
+        ids = [row.id for row in db.scalars(select(Server)).all() if not row.demo]
+    done = 0
+    for server_id in ids:
+        try:
+            refresh_status(server_id)
+            done += 1
+        except Exception:
+            continue
+    return done
+
+
+def connect(server: Server, timeout: float | None = None):
     if server.demo:
         raise SSHError("это демонстрационный узел, SSH к нему не открывается")
     if _connector is not None:
         return _connector(server)
     secret = _box().decrypt(server.ssh_secret_enc)
     target = SSHTarget(server.host, server.ssh_port, server.ssh_user, server.auth_type, secret)
-    return ParamikoSession(target)
+    return ParamikoSession(target, timeout=timeout or 25.0)
 
 
 def _log(job_id: str, step: str, message: str, level: str = "info") -> None:
@@ -900,7 +988,13 @@ def refresh_source(db: Session, source: ListSource) -> int:
             return ingest_values(db, source, "domain", domains, note)
         text = fetch_text(source.url)
     except Exception as exc:  # noqa: BLE001
-        source.last_error = redact(str(exc))[:300]
+        from .lists import FetchError
+
+        if isinstance(exc, FetchError):
+            source.last_error = exc.as_json()[:2000]
+        else:
+            message, detail = ("Не удалось скачать список.", redact(str(exc))[:800])
+            source.last_error = json.dumps({"message": message, "detail": detail}, ensure_ascii=False)
         source.last_fetch = now_iso()
         raise
     return ingest_list_text(db, source, text)
@@ -1058,6 +1152,51 @@ def clear_demo(db: Session) -> None:
     balance = db.get(Balance, 1)
     if balance:
         balance.weights_json = "{}"
+
+
+def apply_quick_setup(db: Session) -> dict:
+    """Российские сайты напрямую, остальное через каскад, четыре пресета в каскад."""
+    from .editor import validate_action, validate_match
+
+    wanted = [
+        ("Российские сайты", {"type": "geo", "value": "geosite:ru"}, "direct"),
+        ("Всё остальное", {"type": "any", "value": ""}, "cascade"),
+    ]
+    rules = list(db.scalars(select(RoutingRule).order_by(RoutingRule.position)).all())
+    by_name = {row.name: row for row in rules}
+    created: list[str] = []
+    for name, match, action in wanted:
+        if name in by_name:
+            continue
+        checked = validate_match(match)
+        validate_action(db, action, None, None, None)
+        positions = [row.position for row in rules]
+        position = (max(positions) + 1) if positions else 1
+        catch = by_name.get("Всё остальное")
+        if name == "Российские сайты" and catch is not None:
+            for row in rules:
+                if row.position >= catch.position:
+                    row.position += 1
+            position = catch.position
+        rule = RoutingRule(
+            id=str(uuid.uuid4()),
+            position=position,
+            name=name,
+            match_json=json.dumps(checked, ensure_ascii=False),
+            action=action,
+            enabled=True,
+        )
+        db.add(rule)
+        rules.append(rule)
+        by_name[name] = rule
+        created.append(name)
+    presets = ["youtube", "openai", "google-ai", "telegram"]
+    for preset_id in presets:
+        set_preset_enabled(db, preset_id, True)
+    entry = db.scalar(select(Server).where(Server.role == "entry"))
+    if entry:
+        entry.config_dirty = True
+    return {"rules": created, "presets": presets}
 
 
 def settings_view(db: Session) -> dict:

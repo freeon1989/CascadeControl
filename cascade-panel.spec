@@ -10,6 +10,8 @@ hidden = []
 
 for package in (
     "cascade_panel",
+    "certifi",
+    "truststore",
     "uvicorn",
     "fastapi",
     "starlette",
@@ -37,7 +39,16 @@ agent = os.path.join("agent", "dist", "cascade-agent")
 if os.path.isfile(agent):
     datas.append((agent, "agent"))
 
+try:
+    import certifi
+
+    datas.append((certifi.where(), "certifi"))
+except Exception:
+    pass
+
 hidden += [
+    "certifi",
+    "truststore",
     "uvicorn.logging",
     "uvicorn.loops",
     "uvicorn.loops.auto",

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { SourceError } from "../sourceError";
 import { Banner, Page } from "./Overview";
 
 type Settings = {
@@ -84,7 +85,7 @@ export function SettingsPage() {
                   <div className="font-medium">{source.title}</div>
                   <div className="break-all text-xs text-mist">{source.url}</div>
                   <div className="mt-1 text-xs text-mist">{source.kind} · {source.enabled ? "включён" : "выключен"} · записей {source.last_count}</div>
-                  {source.last_error && <div className="text-xs text-amber">{source.last_error}</div>}
+                  {source.last_error && <SourceError raw={source.last_error} />}
                   <button className="mt-2 text-xs text-teal" onClick={() => api(`/api/sources/${source.id}/refresh`, { method: "POST" }).then(load).catch((err: Error) => setError(err.message))}>
                     Обновить сейчас
                   </button>

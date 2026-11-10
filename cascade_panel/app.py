@@ -38,6 +38,7 @@ from .service import (
     create_client,
     create_server,
     reconfigure_worker,
+    refresh_status,
     update_server,
     decide,
     export_client,
@@ -47,6 +48,7 @@ from .service import (
     set_detect_enabled,
     set_preset_enabled,
     upsert_address,
+    apply_quick_setup,
     overview,
     precheck_worker,
     record_detection,
@@ -152,7 +154,7 @@ class DnsIn(BaseModel):
 
 
 class SourceIn(BaseModel):
-    id: str
+    id: str = ""
     title: str
     url: str
     kind: str = "domain"
@@ -189,6 +191,31 @@ class ClassifyIn(BaseModel):
 
 class ListTextIn(BaseModel):
     text: str
+
+
+def _slug(text: str) -> str:
+    chars: list[str] = []
+    for ch in text.lower().strip():
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
+            chars.append(ch)
+        elif ch in " -_" and chars and chars[-1] != "-":
+            chars.append("-")
+    return "".join(chars).strip("-")[:40] or "list"
+
+
+def _source_id(db, explicit: str, title: str) -> str:
+    raw = explicit.strip()
+    if raw:
+        if db.get(ListSource, raw):
+            raise HTTPException(400, "такой источник уже есть")
+        return raw
+    base = _slug(title)
+    candidate = base
+    number = 2
+    while db.get(ListSource, candidate):
+        candidate = f"{base}-{number}"
+        number += 1
+    return candidate
 
 
 def create_app(database: Path | None = None, do_seed: bool | None = None) -> FastAPI:
@@ -252,6 +279,20 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
                 server.role = body.role
                 server.config_dirty = True
                 return server_view(server)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/servers/{server_id}/status")
+    def post_status(server_id: str) -> dict:
+        try:
+            with session() as db:
+                if db.get(Server, server_id) is None:
+                    raise HTTPException(404, "узел не найден")
+            server = refresh_status(server_id)
+            with session() as db:
+                fresh = db.get(Server, server_id)
+                assert fresh
+                return server_view(fresh)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -420,6 +461,11 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
         if body is None:
             raise HTTPException(404, "подписка не найдена")
         return PlainTextResponse(body)
+
+    @app.post("/api/routing/quick-setup")
+    def post_quick_setup() -> dict:
+        with session() as db:
+            return apply_quick_setup(db)
 
     @app.get("/api/rules")
     def get_rules() -> list:
@@ -763,11 +809,10 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
         if not body.url.startswith("http://") and not body.url.startswith("https://"):
             raise HTTPException(400, "нужен http(s) адрес списка")
         with session() as db:
-            if db.get(ListSource, body.id):
-                raise HTTPException(400, "такой источник уже есть")
+            source_id = _source_id(db, body.id, body.title)
             row = ListSource(
-                id=body.id.strip(),
-                title=body.title.strip() or body.id.strip(),
+                id=source_id,
+                title=body.title.strip() or source_id,
                 url=body.url.strip(),
                 kind=kind,
                 action=body.action if body.action in {"direct", "cascade", "block"} else "cascade",
@@ -846,7 +891,10 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             try:
                 count = refresh_source(db, source)
             except Exception as exc:  # noqa: BLE001
-                raise HTTPException(502, str(exc)) from exc
+                from .lists import FetchError
+
+                text = exc.message if isinstance(exc, FetchError) else "Не удалось скачать список."
+                raise HTTPException(502, text) from exc
             return {"count": count, "error": source.last_error}
 
     @app.post("/api/sources/{source_id}/ingest")
@@ -963,5 +1011,26 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
                 time.sleep(3600)
 
         threading.Thread(target=_refresh_loop, name="cascade-lists", daemon=True).start()
+
+        if os.environ.get("CASCADE_STATS", "1") != "0":
+
+            def _stats_loop() -> None:
+                import time
+
+                time.sleep(8)
+                while True:
+                    try:
+                        from .service import refresh_all_status
+
+                        refresh_all_status()
+                    except Exception:
+                        pass
+                    try:
+                        pause = int(os.environ.get("CASCADE_STATS_SEC", "30"))
+                    except ValueError:
+                        pause = 30
+                    time.sleep(max(10, pause))
+
+            threading.Thread(target=_stats_loop, name="cascade-stats", daemon=True).start()
 
     return app

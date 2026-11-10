@@ -59,6 +59,9 @@ def probe_domain(domain: str, timeout: float = 4.0, port: int = 443) -> Probe:
             return Probe("reset", text)
         return Probe("error", text)
     try:
+        from .tls import install_tls
+
+        install_tls()
         ctx = ssl.create_default_context()
         tls = ctx.wrap_socket(sock, server_hostname=domain)
         try:

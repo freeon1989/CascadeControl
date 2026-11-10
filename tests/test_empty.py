@@ -121,3 +121,20 @@ def test_address_enrichment_on_empty_database(empty: TestClient):
     assert detected and detected[0]["source"] == "detect"
     client = empty.post("/api/clients", json={"name": "router", "kind": "router", "protocol": "awg"})
     assert client.status_code == 400
+
+
+def test_quick_setup_and_source_without_id(empty):
+    ready = empty.post("/api/routing/quick-setup")
+    assert ready.status_code == 200, ready.text
+    names = [row["name"] for row in empty.get("/api/rules").json()]
+    assert names[0] == "Российские сайты"
+    assert names[-1] == "Всё остальное"
+    again = empty.post("/api/routing/quick-setup").json()
+    assert again["rules"] == []
+    assert len(empty.get("/api/rules").json()) == 2
+    created = empty.post(
+        "/api/sources",
+        json={"title": "Свой список", "url": "https://example.test/list.txt", "kind": "domain"},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["id"] == "list"

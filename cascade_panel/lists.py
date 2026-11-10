@@ -3,8 +3,22 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 from datetime import datetime, timezone
+from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+from .tls import certifi_context, explain_fetch_error, is_cert_error, system_context
+
+
+class FetchError(Exception):
+    def __init__(self, message: str, detail: str) -> None:
+        super().__init__(message)
+        self.message = message
+        self.detail = detail
+
+    def as_json(self) -> str:
+        return json.dumps({"message": self.message, "detail": self.detail}, ensure_ascii=False)
 
 
 DEFAULT_SOURCES = [
@@ -152,17 +166,34 @@ def parse_geosite_dat(data: bytes) -> dict[str, list[str]]:
     return found
 
 
-def fetch_bytes(url: str, timeout: float = 30.0) -> bytes:
+def _read(url: str, timeout: float, context, limit: int) -> bytes:
     req = Request(url, headers={"User-Agent": "cascade-control/0.1"})
-    with urlopen(req, timeout=timeout) as resp:  # noqa: S310 — URL задаёт владелец
-        return resp.read(20_000_000)
+    with urlopen(req, timeout=timeout, context=context) as resp:  # noqa: S310 — URL задаёт владелец
+        return resp.read(limit)
+
+
+def _download(url: str, timeout: float, limit: int) -> bytes:
+    """Сначала системное хранилище. Если оно не ответило или не доверяет сертификату, берём certifi."""
+    try:
+        return _read(url, min(timeout, 8), system_context(), limit)
+    except (URLError, OSError, TimeoutError) as exc:
+        timed_out = "timed out" in str(exc).lower() or isinstance(exc, TimeoutError)
+        if not is_cert_error(exc) and not timed_out:
+            message, detail = explain_fetch_error(exc)
+            raise FetchError(message, detail) from exc
+        try:
+            return _read(url, timeout, certifi_context(), limit)
+        except (URLError, OSError, TimeoutError) as second:
+            message, detail = explain_fetch_error(second)
+            raise FetchError(message, detail) from second
+
+
+def fetch_bytes(url: str, timeout: float = 30.0) -> bytes:
+    return _download(url, timeout, 20_000_000)
 
 
 def fetch_text(url: str, timeout: float = 20.0) -> str:
-    req = Request(url, headers={"User-Agent": "cascade-control/0.1"})
-    with urlopen(req, timeout=timeout) as resp:  # noqa: S310 — URL задаёт владелец
-        data = resp.read(8_000_000)
-    return data.decode("utf-8", errors="replace")
+    return _download(url, timeout, 8_000_000).decode("utf-8", errors="replace")
 
 
 def now_iso() -> str:

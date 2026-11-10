@@ -43,7 +43,17 @@ export type Server = {
   hysteria2: { enabled: boolean; reason: string };
   cpu: number | null;
   ram: string | null;
+  disk: string;
+  uptime: string;
   ping_ms: number | null;
+  checked_at: string;
+  live: {
+    online: boolean | null;
+    docker: string;
+    agent: string;
+    xray: string;
+    awg: { up: boolean; handshakes: number } | null;
+  };
   share: number | null;
   speed_mbps: number | null;
   spark: number[];

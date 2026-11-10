@@ -29,7 +29,22 @@ export function ServersPage() {
 
   useEffect(() => {
     void load();
+    const timer = window.setInterval(() => void load(), 15000);
+    return () => window.clearInterval(timer);
   }, []);
+
+  async function refreshStatus(id: string) {
+    setError("");
+    setBusy(id + "status");
+    try {
+      await api(`/api/servers/${id}/status`, { method: "POST" });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ошибка");
+    } finally {
+      setBusy("");
+    }
+  }
 
   async function act(id: string, action: string) {
     setError("");
@@ -78,6 +93,7 @@ export function ServersPage() {
                   <td className="px-3 py-3">
                     <div className="font-medium">{row.name}</div>
                     <div className="text-xs text-mist">{roleLabel[row.role]}{row.demo ? " · демо" : ""}{row.config_dirty ? " · не отправлено" : ""}</div>
+                    {(row.uptime || row.disk) && <div className="text-xs text-mist">{[row.uptime && `аптайм ${row.uptime}`, row.disk && `диск ${row.disk}`].filter(Boolean).join(" · ")}</div>}
                   </td>
                   <td className="px-3 py-3 font-mono text-xs">{row.host}</td>
                   <td className="px-3 py-3"><span className="rounded-full bg-white/5 px-2 py-1 text-xs">{roleLabel[row.role]}</span></td>
@@ -89,6 +105,7 @@ export function ServersPage() {
                       ))}
                       <span className="rounded-md bg-white/5 px-2 py-0.5 text-xs text-mist">Hysteria2 выкл</span>
                     </div>
+                    <ProtocolLive live={row.live} />
                   </td>
                   <td className="px-3 py-3">
                     <div>{row.cpu != null ? `${row.cpu}%` : "—"}</div>
@@ -98,15 +115,20 @@ export function ServersPage() {
                   <td className="px-3 py-3 text-ok">{row.ping_ms != null ? `${row.ping_ms} мс` : "—"}</td>
                   <td className="px-3 py-3">
                     <button type="button" className="text-left" onClick={() => setReportId(row.id)}>
-                      <span className={row.status === "online" ? "text-ok" : row.status === "error" ? "text-rose" : "text-mist"}>
-                        {row.status === "online" ? "Онлайн" : row.status === "offline" ? "Офлайн" : row.status === "error" ? "Ошибка" : "Не проверен"}
+                      <span className="inline-flex items-center gap-1">
+                        <span className={`inline-block h-2 w-2 rounded-full ${row.status === "online" ? "bg-ok" : row.status === "offline" || row.status === "error" ? "bg-rose" : "bg-mist"}`} />
+                        <span className={row.status === "online" ? "text-ok" : row.status === "offline" || row.status === "error" ? "text-rose" : "text-mist"}>
+                          {row.status === "online" ? "Онлайн" : row.status === "offline" ? "Офлайн" : row.status === "error" ? "Ошибка" : "Не проверен"}
+                        </span>
                       </span>
+                      {row.checked_at && <div className="text-xs text-mist">проверка {checkedLabel(row.checked_at)}</div>}
                       {row.last_error && <div className="max-w-[220px] text-xs text-rose underline decoration-rose/40">{row.last_error}</div>}
                       {!row.last_error && <div className="text-xs text-mist underline decoration-white/20">отчёт проверки</div>}
                     </button>
                   </td>
                   <td className="px-3 py-3">
                     <div className="flex max-w-[280px] flex-wrap gap-1">
+                      <Mini disabled={busy !== ""} onClick={() => void refreshStatus(row.id)}>Статус</Mini>
                       <Mini disabled={busy !== ""} onClick={() => setEditId(row.id)}>Изменить</Mini>
                       <Mini disabled={busy !== ""} onClick={() => act(row.id, "precheck")}>Перепроверить</Mini>
                       <Mini disabled={busy !== ""} onClick={() => act(row.id, "reconfigure")}>Перенастроить</Mini>
@@ -138,6 +160,24 @@ export function ServersPage() {
       )}
     </Page>
   );
+}
+
+function ProtocolLive({ live }: { live?: Server["live"] }) {
+  if (!live) return null;
+  const bits: string[] = [];
+  if (live.awg) bits.push(`AWG: ${live.awg.handshakes} рукопожатий`);
+  if (live.xray === "active") bits.push("Xray: активен");
+  else if (live.xray && live.xray !== "missing") bits.push("Xray: нет");
+  if (live.agent === "active") bits.push("агент: работает");
+  if (live.docker === "active") bits.push("Docker: работает");
+  if (!bits.length) return null;
+  return <div className="mt-1 text-[11px] text-mist">{bits.join(" · ")}</div>;
+}
+
+function checkedLabel(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
 }
 
 function Mini({ children, onClick, disabled }: { children: string; onClick: () => void; disabled?: boolean }) {

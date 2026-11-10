@@ -172,9 +172,10 @@ def _load_pkey(secret: str):
 class FakeSession:
     """Подмена SSH в тестах и в сухом прогоне."""
 
-    def __init__(self, precheck_output: str = "", fail_connect: bool = False) -> None:
+    def __init__(self, precheck_output: str = "", fail_connect: bool = False, stats_output: str = "") -> None:
         self.precheck_output = precheck_output
         self.fail_connect = fail_connect
+        self.stats_output = stats_output
         self.files: dict[str, bytes] = {}
         self.commands: list[str] = []
 
@@ -188,6 +189,14 @@ class FakeSession:
 
     def run(self, command: str, on_line: Callable[[str], None]) -> int:
         self.commands.append(command)
+        if "stats.sh" in command:
+            text = self.stats_output or (
+                'CASCADE_STATS {"cpu":1,"ram":"0.1 / 1 ГБ","disk":"1 / 10 ГБ","uptime":"1 ч",'
+                '"docker":"missing","agent":"missing","xray":"missing","awg":null}'
+            )
+            for line in text.splitlines():
+                on_line(line)
+            return 0 if "CASCADE_STATS" in text else 1
         if "precheck.sh" in command:
             for line in self.precheck_output.splitlines():
                 on_line(line)

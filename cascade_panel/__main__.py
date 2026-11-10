@@ -13,6 +13,7 @@ import uvicorn
 from .app import create_app
 from .redact import install_redaction
 from .settings import HOST, data_dir, port
+from .tls import install_tls
 
 
 def _say(message: str) -> None:
@@ -61,6 +62,7 @@ def _open_webview(url: str) -> bool:
 
 
 def main(argv: list[str] | None = None) -> None:
+    install_tls()
     install_redaction()
     parser = argparse.ArgumentParser(description="Cascade Control")
     parser.add_argument("--port", type=int, default=port())

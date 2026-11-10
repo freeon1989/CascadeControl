@@ -428,6 +428,7 @@ def refresh_status(server_id: str) -> Server:
         demo = server.demo
         host = server.host
         port = server.ssh_port or 22
+        role = server.role
         previous = _stats(server)
     checked = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     if demo:
@@ -477,6 +478,20 @@ def refresh_status(server_id: str) -> Server:
     with session() as db:
         server = db.get(Server, server_id)
         assert server
+        if remote is not None and role in ENTRY_ROLES:
+            from .status import apply_awg_peers, apply_xray_users, peer_rows_from_stats, xray_rows_from_stats
+
+            peers = peer_rows_from_stats(remote)
+            if peers is not None:
+                rows = list(db.scalars(select(Client).where(Client.server_id == server.id)).all())
+                now = datetime.now(timezone.utc)
+                apply_awg_peers(rows, peers, now)
+                apply_xray_users(rows, xray_rows_from_stats(remote), now)
+                online_now = sum(1 for item in rows if item.online)
+                total_now = sum(int(item.rx_bytes or 0) + int(item.tx_bytes or 0) for item in rows)
+                merged["client_spark"] = (list(merged.get("client_spark") or []) + [online_now])[-16:]
+                merged["traffic_spark"] = (list(merged.get("traffic_spark") or []) + [total_now])[-16:]
+                merged["clients_online"] = online_now
         server.stats_json = json.dumps(merged, ensure_ascii=False)
         server.status = "online" if remote is not None else "offline"
     return server
@@ -1357,12 +1372,23 @@ def overview(db: Session) -> dict:
         "speed_mbps": stats.get("speed_mbps") or 0,
         "demo": bool(entry and entry.demo),
         "sparks": {
-            "clients": stats.get("spark") or [online_clients],
-            "traffic": stats.get("spark") or [1],
+            "clients": _spark(stats, "client_spark", bool(entry and entry.demo), online_clients),
+            "traffic": _spark(stats, "traffic_spark", bool(entry and entry.demo), traffic),
             "ping": stats.get("spark") or [ping or 0],
             "nodes": stats.get("spark") or [nodes_up],
         },
     }
+
+
+def _spark(stats: dict, key: str, demo: bool, fallback: int) -> list:
+    series = stats.get(key)
+    if isinstance(series, list) and series:
+        return series
+    if demo:
+        seeded = stats.get("spark")
+        if isinstance(seeded, list) and seeded:
+            return seeded
+    return [fallback]
 
 
 def chain_summary(db: Session) -> dict:

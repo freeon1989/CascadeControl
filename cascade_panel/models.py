@@ -72,6 +72,7 @@ class Client(Base):
     tx_bytes: Mapped[int] = mapped_column(Integer, default=0)
     last_seen: Mapped[str] = mapped_column(String(40), default="")
     traffic_json: Mapped[str] = mapped_column(Text, default="[]")
+    counters_json: Mapped[str] = mapped_column(Text, default="{}")
     sub_token: Mapped[str] = mapped_column(String(64), default="")
     demo: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

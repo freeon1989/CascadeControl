@@ -33,6 +33,7 @@ def init_db(path: Path) -> None:
         _ensure_column(conn, "list_sources", "interval_hours", "INTEGER DEFAULT 24")
         _ensure_column(conn, "list_sources", "selector", "VARCHAR(64) DEFAULT ''")
         _ensure_column(conn, "servers", "protocols_json", "TEXT DEFAULT ''")
+        _ensure_column(conn, "clients", "counters_json", "TEXT DEFAULT '{}'")
     _Session = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
 
 

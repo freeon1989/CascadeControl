@@ -92,6 +92,8 @@ def entry_config(
     strategy_type = {"least_ping": "leastPing", "round_robin": "roundRobin", "weighted": "random"}.get(
         strategy, "leastPing"
     )
+    # TODO: трафик клиентов VLESS. StatsService и api здесь не включены,
+    # чтобы не трогать рабочий tproxy. Пока живые rx/tx есть только у AWG.
     return {
         "log": {"loglevel": "warning"},
         "inbounds": [

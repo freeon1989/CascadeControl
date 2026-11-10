@@ -29,6 +29,8 @@ export function ClientsPage() {
 
   useEffect(() => {
     void load();
+    const timer = window.setInterval(() => void load(), 15000);
+    return () => window.clearInterval(timer);
   }, []);
 
   return (
@@ -116,7 +118,23 @@ function ClientDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   }
 
   useEffect(() => {
-    void load();
+    let stop = false;
+    let first = true;
+    async function pull() {
+      const detail = await api<Client & { export: ExportBundle }>(`/api/clients/${id}`);
+      if (stop) return;
+      setData(detail);
+      if (first) {
+        first = false;
+        setTab(detail.protocol === "vless" ? "sub" : "conf");
+      }
+    }
+    void pull();
+    const timer = window.setInterval(() => void pull(), 15000);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
   }, [id]);
 
   if (!data) return null;

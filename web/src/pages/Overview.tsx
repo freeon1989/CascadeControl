@@ -7,10 +7,24 @@ export function OverviewPage() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    api<Overview>("/api/overview").then(setData).catch((err: Error) => setError(err.message));
+    let stop = false;
+    async function load() {
+      try {
+        const next = await api<Overview>("/api/overview");
+        if (!stop) setData(next);
+      } catch (err) {
+        if (!stop) setError(err instanceof Error ? err.message : "ошибка");
+      }
+    }
+    void load();
+    const timer = window.setInterval(() => void load(), 15000);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
   }, []);
 
-  if (error) return <Banner text={error} />;
+  if (!data && error) return <Banner text={error} />;
   if (!data) return <Banner text="Загрузка обзора…" />;
   if (!data.entry) {
     return (

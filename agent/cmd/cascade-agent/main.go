@@ -15,6 +15,7 @@ import (
 	"cascade-agent/internal/detect"
 	"cascade-agent/internal/failover"
 	"cascade-agent/internal/lists"
+	"cascade-agent/internal/peers"
 	"cascade-agent/internal/xraypatch"
 )
 
@@ -29,12 +30,14 @@ type exitStatus struct {
 }
 
 type statusDoc struct {
-	Updated  string       `json:"updated"`
-	Strategy string       `json:"strategy"`
-	Active   []string     `json:"active"`
-	Exits    []exitStatus `json:"exits"`
+	Updated  string         `json:"updated"`
+	Strategy string         `json:"strategy"`
+	Active   []string       `json:"active"`
+	Exits    []exitStatus   `json:"exits"`
 	Lists    map[string]int `json:"lists"`
-	Detected []detected    `json:"detected"`
+	Detected []detected     `json:"detected"`
+	AwgDump  string         `json:"awg_dump,omitempty"`
+	Peers    []peers.Peer   `json:"peers,omitempty"`
 }
 
 type detected struct {
@@ -97,7 +100,8 @@ func pass(cfg config.File, health map[string]failover.Health, cursor int, status
 	}
 	counts := refreshLists(cfg)
 	found := watchDomains(cfg, timeout)
-	writeStatus(statusPath, cfg, health, active, counts, found)
+	dump := peers.Collect()
+	writeStatus(statusPath, cfg, health, active, counts, found, dump, peers.ParseDump(dump))
 	return active
 }
 
@@ -181,7 +185,7 @@ func refreshLists(cfg config.File) map[string]int {
 	return counts
 }
 
-func writeStatus(path string, cfg config.File, health map[string]failover.Health, active []string, counts map[string]int, found []detected) {
+func writeStatus(path string, cfg config.File, health map[string]failover.Health, active []string, counts map[string]int, found []detected, dump string, peerRows []peers.Peer) {
 	selected := map[string]bool{}
 	for _, id := range active {
 		selected[id] = true
@@ -192,6 +196,8 @@ func writeStatus(path string, cfg config.File, health map[string]failover.Health
 		Active:   active,
 		Lists:    counts,
 		Detected: found,
+		AwgDump:  dump,
+		Peers:    peerRows,
 	}
 	for _, exit := range cfg.Exits {
 		cur := health[exit.ID]

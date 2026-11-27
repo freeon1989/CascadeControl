@@ -62,7 +62,7 @@ export function FlowDiagram({ data, onSelect }: { data: FlowData; onSelect?: (id
     boxes.push({ id: item.id, x: col.clients, y: 80 + index * (clientH + 12), w: 180, h: clientH, node: item });
   });
   if (data.entry) {
-    const y = Math.max(120, (data.clients.length * 76) / 2);
+    const y = Math.max(160, (data.clients.length * 76) / 2 + 40);
     boxes.push({ id: data.entry.id, x: col.entry, y, w: 200, h: 150, node: data.entry });
     if (data.standby_entry) {
       boxes.push({ id: data.standby_entry.id, x: col.entry, y: y + 170, w: 200, h: 110, node: data.standby_entry });
@@ -70,35 +70,64 @@ export function FlowDiagram({ data, onSelect }: { data: FlowData; onSelect?: (id
   }
   const ru = data.specials.find((item) => item.id === "direct-ru");
   const inetDirect = data.specials.find((item) => item.id === "internet-direct");
-  if (ru) boxes.push({ id: ru.id, x: col.mid, y: 36, w: 200, h: 110, node: ru });
-  if (inetDirect) boxes.push({ id: inetDirect.id, x: col.end, y: 44, w: 180, h: 90, node: inetDirect });
-  if (data.transit) boxes.push({ id: data.transit.id, x: col.mid, y: 220, w: 200, h: 140, node: data.transit });
+  if (ru) boxes.push({ id: ru.id, x: col.mid, y: 24, w: 200, h: 100, node: ru });
+  if (inetDirect) boxes.push({ id: inetDirect.id, x: col.end, y: 28, w: 180, h: 90, node: inetDirect });
+  if (data.transit) boxes.push({ id: data.transit.id, x: col.mid, y: 240, w: 200, h: 140, node: data.transit });
   data.exits.forEach((item, index) => {
-    boxes.push({ id: item.id, x: col.exits, y: 180 + index * 170, w: 210, h: 150, node: item });
+    boxes.push({ id: item.id, x: col.exits, y: 200 + index * 170, w: 210, h: 150, node: item });
   });
   data.specials
     .filter((item) => item.id.startsWith("warp-") || item.id === "internet")
     .forEach((item, index) => {
-      const y = item.id === "internet" ? 220 + Math.max(data.exits.length, 1) * 80 : 180 + index * 170;
+      const y = item.id === "internet" ? 240 + Math.max(data.exits.length, 1) * 80 : 200 + index * 170;
       boxes.push({ id: item.id, x: col.end, y, w: 190, h: item.id === "internet" ? 90 : 120, node: item });
     });
 
   const pos = new Map(boxes.map((box) => [box.id, box]));
-  const height = Math.max(420, ...boxes.map((box) => box.y + box.h + 40));
+  const height = Math.max(420, ...boxes.map((box) => box.y + box.h + 48));
   const width = 1260;
 
-  function port(box: Box, side: "in" | "out") {
+  function port(box: Box, side: "in" | "out", edge?: FlowEdge) {
+    if (edge?.kind === "direct" && side === "out" && box.node.role === "entry") {
+      return { x: box.x + box.w * 0.7, y: box.y };
+    }
+    if (edge?.kind === "direct" && side === "in" && box.node.role === "direct") {
+      return { x: box.x, y: box.y + box.h * 0.7 };
+    }
     return { x: side === "in" ? box.x : box.x + box.w, y: box.y + box.h / 2 };
   }
 
-  function path(from: string, to: string): string {
-    const a = pos.get(from);
-    const b = pos.get(to);
+  function path(edge: FlowEdge): string {
+    const a = pos.get(edge.from);
+    const b = pos.get(edge.to);
     if (!a || !b) return "";
-    const s = port(a, "out");
-    const e = port(b, "in");
+    const s = port(a, "out", edge);
+    const e = port(b, "in", edge);
     const mid = (s.x + e.x) / 2;
     return `M ${s.x} ${s.y} C ${mid} ${s.y}, ${mid} ${e.y}, ${e.x} ${e.y}`;
+  }
+
+  function labelPoint(edge: FlowEdge): { x: number; y: number } {
+    const a = pos.get(edge.from);
+    const b = pos.get(edge.to);
+    if (!a || !b) return { x: 0, y: 0 };
+    const s = port(a, "out", edge);
+    const e = port(b, "in", edge);
+    let x = (s.x + e.x) / 2;
+    let y = (s.y + e.y) / 2 - 10;
+    const hits = (box: Box, px: number, py: number, pad = 10) =>
+      px > box.x - pad && px < box.x + box.w + pad && py > box.y - pad && py < box.y + box.h + pad;
+    if ([...pos.values()].some((box) => hits(box, x, y))) {
+      x = (a.x + a.w + b.x) / 2;
+      const above = Math.min(a.y, b.y) - 14;
+      y = above >= 14 ? above : Math.max(a.y + a.h, b.y + b.h) + 16;
+    }
+    if (edge.kind === "direct" && a.node.role === "entry") {
+      x = (s.x + e.x) / 2;
+      y = Math.min(s.y, e.y) - 12;
+      if (y < 14) y = 16;
+    }
+    return { x, y };
   }
 
   function click(id: string) {
@@ -124,18 +153,15 @@ export function FlowDiagram({ data, onSelect }: { data: FlowData; onSelect?: (id
       </div>
       <svg viewBox={`0 0 ${width} ${height}`} className="min-w-[900px] w-full" role="img" aria-label="Схема движения трафика">
         {data.edges.map((edge, index) => {
-          const d = path(edge.from, edge.to);
+          const d = path(edge);
           if (!d) return null;
           const cls = `flow-line ${edge.active ? "active" : "down"} ${edge.style || edge.kind}`;
-          const a = pos.get(edge.from);
-          const b = pos.get(edge.to);
-          const tx = a && b ? (a.x + a.w + b.x) / 2 : 0;
-          const ty = a && b ? (a.y + a.h / 2 + b.y + b.h / 2) / 2 - 6 : 0;
+          const point = labelPoint(edge);
           return (
             <g key={`${edge.from}-${edge.to}-${index}`}>
               <path d={d} className={cls} />
               {edge.label && (
-                <text x={tx} y={ty} textAnchor="middle" className="fill-mist" style={{ fontSize: 10 }}>
+                <text x={point.x} y={point.y} textAnchor="middle" className="flow-label fill-mist">
                   {edge.label}
                 </text>
               )}
@@ -149,11 +175,20 @@ export function FlowDiagram({ data, onSelect }: { data: FlowData; onSelect?: (id
               onClick={() => click(box.id)}
               className={`flex h-full w-full items-stretch overflow-hidden rounded-2xl border border-line bg-card/80 text-left ring-2 ${tone(box.node.kind, box.node.status)}`}
             >
-              {box.node.heroine !== "" && (
-                <div className="relative w-16 shrink-0 self-end sm:w-20">
-                  <img className="heroine-cut h-full w-full" alt="" src={box.node.heroine || heroineSrc(box.node.country)} />
+              {box.node.role === "direct" ? (
+                <div className="flex w-16 shrink-0 items-center justify-center sm:w-20">
+                  <span className="flex h-10 w-10 items-center justify-center rounded-full bg-ok/20 text-ok" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="1.8">
+                      <circle cx="12" cy="12" r="8" />
+                      <path d="M12 8v8M8 12h8" strokeLinecap="round" />
+                    </svg>
+                  </span>
                 </div>
-              )}
+              ) : box.node.heroine !== "" && box.node.role !== "internet" && box.node.role !== "warp" && box.node.role !== "client" && box.node.role !== "clients" ? (
+                <div className="heroine-frame relative w-16 shrink-0 self-stretch sm:w-20">
+                  <img className="heroine-cut h-full w-full" alt="" src={box.node.heroine || heroineSrc(box.node.country, box.node.name)} />
+                </div>
+              ) : null}
               <div className="min-w-0 flex-1 p-2">
                 <div className="truncate text-xs font-semibold">{box.node.name}</div>
                 <div className="text-[10px] uppercase tracking-wide text-mist">{roleText(box.node)}</div>

@@ -28,6 +28,7 @@ class Server(Base):
     ssh_secret_enc: Mapped[str] = mapped_column(Text, default="")
     role: Mapped[str] = mapped_column(String(32))
     country: Mapped[str] = mapped_column(String(8), default="")
+    heroine_key: Mapped[str] = mapped_column(String(16), default="")
     status: Mapped[str] = mapped_column(String(16), default="unknown")
     demo: Mapped[bool] = mapped_column(Boolean, default=False)
     awg_port: Mapped[int | None] = mapped_column(Integer, nullable=True)

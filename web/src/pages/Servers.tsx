@@ -125,7 +125,7 @@ export function ServersPage() {
         <div className="mb-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {rows.map((row) => (
             <article key={row.id} className="card relative overflow-hidden p-4">
-              <img src={row.heroine || heroineSrc(row.country)} alt="" className="heroine-cut absolute bottom-0 right-2 h-40 w-24 opacity-95" />
+              <img src={row.heroine || heroineSrc(row.country, row.name, row.host)} alt="" className="heroine-cut heroine-frame absolute bottom-0 right-2 h-40 w-24 opacity-95" />
               <div className="relative pr-24">
                 <div className="flex items-start justify-between gap-2">
                   <div>
@@ -163,6 +163,7 @@ export function ServersPage() {
                     <label className="flex items-center gap-2"><input type="checkbox" disabled={busy !== "" || row.demo} checked={Boolean(row.protect?.bittorrent)} onChange={(e) => void setProtect(row, { bittorrent: e.target.checked })} /> Блокировать торренты</label>
                     <label className="flex items-center gap-2"><input type="checkbox" disabled={busy !== "" || row.demo} checked={Boolean(row.protect?.private)} onChange={(e) => void setProtect(row, { private: e.target.checked })} /> Закрыть локальную сеть сервера</label>
                     <label className="flex items-center gap-2"><input type="checkbox" disabled={busy !== "" || row.demo} checked={Boolean(row.protect?.ads)} onChange={(e) => void setProtect(row, { ads: e.target.checked })} /> Резать рекламу</label>
+                    <HeroinePicker server={row} onChanged={(fresh) => setRows((rows) => (rows || []).map((item) => (item.id === fresh.id ? { ...item, ...fresh } : item)))} />
                   </div>
                 )}
                 <div className="mt-3 flex max-w-[220px] flex-wrap gap-1">
@@ -204,6 +205,56 @@ function Mini({ children, onClick, disabled }: { children: string; onClick: () =
     <button className="rounded-md border border-line px-2 py-1 text-xs text-mist hover:text-foam disabled:opacity-40" disabled={disabled} onClick={onClick}>
       {children}
     </button>
+  );
+}
+
+
+type HeroineItem = { key: string; title: string; src: string; auto?: boolean };
+
+function HeroinePicker({ server, onChanged }: { server: Server; onChanged: (row: Server) => void }) {
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<HeroineItem[]>([]);
+  useEffect(() => {
+    void api<{ items: HeroineItem[] }>("/api/heroines").then((data) => setItems(data.items)).catch(() => undefined);
+  }, []);
+  const current = server.heroine_key || "auto";
+  async function choose(key: string) {
+    const fresh = await api<Server>(`/api/servers/${server.id}/heroine`, { method: "PUT", body: JSON.stringify({ key }) });
+    onChanged(fresh);
+    setOpen(false);
+  }
+  return (
+    <div className="mt-2">
+      <button type="button" className="text-xs text-teal" onClick={() => setOpen((value) => !value)}>
+        {open ? "Скрыть галерею" : "Выбрать героиню"}
+      </button>
+      {open && (
+        <div className="mt-2 grid grid-cols-3 gap-2">
+          {items.map((item) => (
+            <button
+              type="button"
+              key={item.key}
+              onClick={() => void choose(item.key)}
+              className={`overflow-hidden rounded-xl border px-1 py-1 text-left text-[10px] ${current === item.key || (item.auto && current === "auto") ? "border-teal text-teal" : "border-line text-mist"}`}
+            >
+              {item.auto ? (
+                <div className="flex h-16 items-center justify-center px-1">Авто (по стране)</div>
+              ) : (
+                <div className="flex h-16 overflow-hidden rounded-lg">
+                  <div data-theme="dark" className="heroine-frame h-full w-1/2 bg-[#0b1524]">
+                    <img src={item.src} alt="" className="heroine-cut h-full w-full" />
+                  </div>
+                  <div data-theme="light" className="heroine-frame h-full w-1/2 bg-[#eef3f8]">
+                    <img src={item.src} alt="" className="heroine-cut h-full w-full" />
+                  </div>
+                </div>
+              )}
+              <div className="mt-1 truncate px-1">{item.title}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -313,6 +364,10 @@ function EditServer({ server, onClose }: { server: Server | null; onClose: () =>
             <label className="text-xs text-mist">Страна
               <input className="mt-1 w-full rounded-lg border border-line bg-ink px-3 py-2" value={form.country} onChange={(e) => setForm({ ...form, country: e.target.value.toUpperCase() })} placeholder="DE" />
             </label>
+            <div className="rounded-lg border border-line px-3 py-2">
+              <div className="mb-1 text-xs text-mist">Героиня узла</div>
+              <HeroinePicker server={server} onChanged={() => undefined} />
+            </div>
             <div className="grid grid-cols-2 gap-2">
               {roles.map(([id, label]) => (
                 <button

@@ -70,7 +70,10 @@ def test_rules_reorder_balance_and_detection(client):
     assert rules[-1]["name"] == "Всё остальное"
     flipped = list(reversed([row["id"] for row in rules]))
     moved = client.put("/api/rules/order", json={"ids": flipped}).json()
-    assert [row["id"] for row in moved] == flipped
+    catch_all = rules[-1]["id"]
+    expected = [rule_id for rule_id in flipped if rule_id != catch_all] + [catch_all]
+    assert [row["id"] for row in moved] == expected
+    assert moved[-1]["catch_all"] is True
     # вернуть исходный порядок, чтобы каскад снова собирался предсказуемо
     client.put("/api/rules/order", json={"ids": [row["id"] for row in rules]})
     decision = client.post("/api/route/decide", params={"host": "www.youtube.com"}).json()

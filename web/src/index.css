@@ -102,10 +102,20 @@ button, input, select, textarea {
 }
 
 .heroine-cut {
-  object-fit: contain;
-  object-position: center bottom;
+  object-fit: cover;
+  object-position: top center;
   pointer-events: none;
   user-select: none;
+}
+.heroine-frame {
+  overflow: hidden;
+}
+.flow-label {
+  font-size: 10px;
+  paint-order: stroke fill;
+  stroke: rgb(var(--card));
+  stroke-width: 4px;
+  stroke-linejoin: round;
 }
 
 .flow-line {

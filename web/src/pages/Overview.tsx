@@ -73,7 +73,7 @@ export function OverviewPage() {
         </div>
         <div className="flex flex-col gap-3">
           <div className="card relative overflow-hidden p-4 shadow-glow">
-            <img src={data.entry.heroine || heroineSrc(data.entry.country)} alt="" className="heroine-cut pointer-events-none absolute bottom-0 right-0 h-36 w-24 opacity-90" />
+            <img src={data.entry.heroine || heroineSrc(data.entry.country, data.entry.name, data.entry.host)} alt="" className="heroine-cut heroine-frame pointer-events-none absolute bottom-0 right-0 h-36 w-24 opacity-90" />
             <div className="relative pr-20">
             <div className="text-xs uppercase tracking-wider text-teal">Вход</div>
             <div className="mt-1 flex items-center justify-between">
@@ -105,7 +105,7 @@ export function OverviewPage() {
             <div className="mt-3 flex flex-col gap-2">
               {data.exits.map((exit) => (
                 <div key={exit.id} className="flex items-center justify-between rounded-xl bg-black/20 px-3 py-2">
-                  <img src={exit.heroine || heroineSrc(exit.country)} alt="" className="heroine-cut mr-2 h-10 w-8" />
+                  <img src={exit.heroine || heroineSrc(exit.country, exit.name, exit.host)} alt="" className="heroine-cut heroine-frame mr-2 h-10 w-8" />
                   <div className="min-w-0 flex-1">
                     <div className="text-sm">{flag[exit.country] || ""} {exit.name}</div>
                     <div className="text-xs text-mist">{roleLabel[exit.role]} · {exit.ping_ms != null ? `${exit.ping_ms} мс` : "нет пинга"}</div>

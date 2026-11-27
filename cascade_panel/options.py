@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select
 
 from .db import session
-from .heroine import heroine_path
+from .heroine import heroine_for
 from .jump import SSH_VIA_ENTRY_KEY, resolve_ssh_plan, setting_enabled
 from .lists import DEFAULT_SOURCES, now_iso
 from .models import AddressEntry, Client, ListSource, Server, Setting
@@ -55,6 +55,9 @@ def set_ssh_via_entry(db, enabled: bool) -> dict:
     return {"ssh_via_entry": enabled}
 
 
+WARP_SITES_SEEDED = "warp_sites_seeded"
+
+
 def ensure_defaults(db) -> None:
     if db.get(Setting, SSH_VIA_ENTRY_KEY) is None:
         db.add(Setting(key=SSH_VIA_ENTRY_KEY, value="0"))
@@ -64,11 +67,18 @@ def ensure_defaults(db) -> None:
     for item in DEFAULT_SOURCES:
         if db.get(ListSource, item["id"]) is None:
             db.add(ListSource(**item))
+    ensure_warp_sites(db)
 
 
 def ensure_warp_sites(db) -> None:
+    """Один раз при миграции/старте, не на каждый запрос страницы."""
+    flag = db.get(Setting, WARP_SITES_SEEDED)
     existing = list(db.scalars(select(AddressEntry).where(AddressEntry.source == WARP_SOURCE)).all())
     if existing:
+        if flag is None:
+            db.add(Setting(key=WARP_SITES_SEEDED, value="1"))
+        return
+    if flag is not None and flag.value == "1":
         return
     for kind, value in DEFAULT_WARP_SITES:
         db.add(
@@ -83,10 +93,13 @@ def ensure_warp_sites(db) -> None:
                 excluded=False,
             )
         )
+    if flag is None:
+        db.add(Setting(key=WARP_SITES_SEEDED, value="1"))
+    else:
+        flag.value = "1"
 
 
 def warp_site_rows(db) -> list[AddressEntry]:
-    ensure_warp_sites(db)
     return list(
         db.scalars(
             select(AddressEntry)
@@ -201,7 +214,7 @@ def node_card(server: Server | None) -> dict | None:
         "country": server.country,
         "status": server.status,
         "demo": server.demo,
-        "heroine": heroine_path(server.country),
+        "heroine": heroine_for(server),
         "warp": warp_of(server) if server.role in EXIT_ROLES else None,
         "protect": protections_of(server) if server.role in EXIT_ROLES else None,
     }
@@ -457,7 +470,7 @@ def enrich_decision(db, host: str | None, ip: str | None, decision: dict) -> dic
     path = []
     entry = next((row for row in servers.values() if row.role == "entry"), None)
     if entry:
-        path.append({"id": entry.id, "name": entry.name, "role": "entry", "heroine": heroine_path(entry.country)})
+        path.append({"id": entry.id, "name": entry.name, "role": "entry", "heroine": heroine_for(entry)})
     label = decision.get("reason") or ""
     if action == "direct":
         outbound = "direct"
@@ -466,7 +479,7 @@ def enrich_decision(db, host: str | None, ip: str | None, decision: dict) -> dic
         outbound = "block"
         label = label or "блокируется"
     elif chosen:
-        path.append({"id": chosen.id, "name": chosen.name, "role": chosen.role, "heroine": heroine_path(chosen.country)})
+        path.append({"id": chosen.id, "name": chosen.name, "role": chosen.role, "heroine": heroine_for(chosen)})
         outbound = f"exit-{chosen.id}"
         status = warp_of(chosen)
         used = False
@@ -490,7 +503,7 @@ def enrich_decision(db, host: str | None, ip: str | None, decision: dict) -> dic
             "exit_id": chosen.id if chosen else decision.get("exit_id"),
             "exit_name": chosen.name if chosen else "",
             "exit_country": chosen.country if chosen else "",
-            "heroine": heroine_path(chosen.country) if chosen else heroine_path(entry.country if entry else ""),
+            "heroine": heroine_for(chosen) if chosen else (heroine_for(entry) if entry else ""),
             "label": label,
             "path": path,
             "warp": warp,
@@ -562,7 +575,7 @@ def flow_view(db) -> dict:
             "country": server.country,
             "status": status,
             "kind": kind,
-            "heroine": heroine_path(server.country),
+            "heroine": heroine_for(server),
             "protocols": proto,
             "ports": ports,
             "warp": warp_of(server) if server.role in EXIT_ROLES else None,
@@ -633,7 +646,7 @@ def flow_view(db) -> dict:
                 edges.append(edge(item.id, "internet", "exit", active=up, label="интернет"))
 
     specials = [
-        {"id": "direct-ru", "name": "Российские сайты", "role": "direct", "kind": "direct", "status": "online" if has_direct else "unknown", "heroine": heroine_path("RU"), "label": "напрямую с входа"},
+        {"id": "direct-ru", "name": "Российские сайты", "role": "direct", "kind": "direct", "status": "online" if has_direct else "unknown", "heroine": "", "icon": "direct-ru", "label": "напрямую с входа"},
         {"id": "internet-direct", "name": "Интернет", "role": "internet", "kind": "internet", "status": "online", "heroine": ""},
         {"id": "internet", "name": "Интернет", "role": "internet", "kind": "internet", "status": "online", "heroine": ""},
     ]

@@ -5,10 +5,30 @@ from cascade_panel.ssh_client import FakeSession
 
 
 def test_heroine_by_country_and_fallback():
+    from cascade_panel.heroine import heroine_for, heroine_path, resolve_country
+
     assert heroine_path("RU").endswith("heroine_ru.webp")
     assert heroine_path("at").endswith("heroine_at.webp")
     assert heroine_path("XX").endswith("heroine_default.webp")
     assert heroine_path("").endswith("heroine_default.webp")
+    assert resolve_country("", "Piter") == "RU"
+    assert resolve_country("", "Amsterdam") == "NL"
+    assert resolve_country("", "Vena") == "AT"
+    assert resolve_country("", "Вена") == "AT"
+    assert heroine_path("", name="Amsterdam").endswith("heroine_nl.webp")
+    assert heroine_path("", name="Vena").endswith("heroine_at.webp")
+    assert heroine_path("", name="Amsterdam") != heroine_path("", name="Vena")
+    assert heroine_path("", name="Amsterdam") != heroine_path("")
+
+    class Fake:
+        country = ""
+        name = "Amsterdam"
+        host = "192.0.2.10"
+        heroine_key = ""
+
+    assert heroine_for(Fake()).endswith("heroine_nl.webp")
+    Fake.heroine_key = "at"
+    assert heroine_for(Fake()).endswith("heroine_at.webp")
 
 
 def test_settings_ssh_via_entry_default_off(client):
@@ -40,6 +60,8 @@ def test_flow_and_decide_include_path(client):
     assert flow["entry"]["heroine"].endswith("heroine_ru.webp")
     assert any(item["heroine"].endswith(".webp") for item in flow["exits"])
     kinds = {edge["kind"] for edge in flow["edges"]}
+    ru = next(item for item in flow["specials"] if item["id"] == "direct-ru")
+    assert ru["heroine"] == ""
     assert "direct" in kinds
     assert "cascade" in kinds
     decision = client.post("/api/route/decide", params={"host": "www.youtube.com"}).json()

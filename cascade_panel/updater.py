@@ -384,7 +384,8 @@ def spawn_updater(stage: Path, new_version: str, port: int) -> None:
         "--log", str(data_dir() / "update.log"),
         "--arg=--webview",
     ]
-    flags = 0x00000008 | 0x00000200 if os.name == "nt" else 0
+    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+    flags = 0x00000008 | 0x00000200 | 0x08000000 if os.name == "nt" else 0
     subprocess.Popen(  # noqa: S603 — собственный exe, без shell
         args, cwd=str(run_dir), close_fds=True, creationflags=flags,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

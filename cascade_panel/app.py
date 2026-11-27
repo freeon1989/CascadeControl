@@ -219,6 +219,10 @@ class WarpIn(BaseModel):
     mode: str = "sites"
 
 
+
+class HeroineIn(BaseModel):
+    key: str = "auto"
+
 class ProtectIn(BaseModel):
     bittorrent: bool | None = None
     private: bool | None = None
@@ -308,11 +312,12 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
     with session() as db:
         if (do_seed if do_seed is not None else seed_enabled()):
             seed_if_empty(db)
-        from .editor import migrate_geo_rules
+        from .editor import migrate_geo_rules, repair_routing
         from .options import ensure_defaults
 
         migrate_geo_rules(db)
         ensure_defaults(db)
+        repair_routing(db)
 
     @app.get("/api/health")
     def health() -> dict:
@@ -645,7 +650,7 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
     def get_rules() -> list:
         with session() as db:
             rows = db.scalars(select(RoutingRule).order_by(RoutingRule.position)).all()
-            return [rule_view(row) for row in rows]
+            return [rule_view(row, db) for row in rows]
 
     @app.post("/api/rules")
     def post_rule(body: RuleIn) -> dict:
@@ -671,11 +676,14 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
                 enabled=body.enabled,
             )
             db.add(rule)
+            db.flush()
+            from .editor import pin_catch_all
+
+            pin_catch_all(db)
             entry = db.scalar(select(Server).where(Server.role == "entry"))
             if entry:
                 entry.config_dirty = True
-            db.flush()
-            return rule_view(rule)
+            return rule_view(rule, db)
 
     @app.patch("/api/rules/{rule_id}")
     def patch_rule(rule_id: str, body: RulePatch) -> dict:
@@ -713,7 +721,7 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             entry = db.scalar(select(Server).where(Server.role == "entry"))
             if entry:
                 entry.config_dirty = True
-            return rule_view(rule)
+            return rule_view(rule, db)
 
     @app.put("/api/rules/order")
     def put_order(body: OrderIn) -> list:
@@ -721,10 +729,10 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             rows = {row.id: row for row in db.scalars(select(RoutingRule)).all()}
             if set(body.ids) != set(rows):
                 raise HTTPException(400, "список правил не совпадает")
-            for index, rule_id in enumerate(body.ids, start=1):
-                rows[rule_id].position = index
-            ordered = db.scalars(select(RoutingRule).order_by(RoutingRule.position)).all()
-            return [rule_view(row) for row in ordered]
+            from .editor import pin_catch_all
+
+            ordered = pin_catch_all(db, body.ids)
+            return [rule_view(row, db) for row in ordered]
 
     @app.delete("/api/rules/{rule_id}")
     def delete_rule(rule_id: str) -> dict:
@@ -1141,7 +1149,7 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
         try:
             with session() as db:
                 rule = apply_preset_rule(db, preset_id)
-                return rule_view(rule)
+                return rule_view(rule, db)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -1193,6 +1201,27 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             raise HTTPException(400, str(exc)) from exc
         job_id = start_job("reconfigure", server_id, reconfigure_worker) if ready else None
         return {"server": view, "job_id": job_id}
+
+    @app.get("/api/heroines")
+    def get_heroines() -> dict:
+        from .heroine import catalog
+
+        return {"items": catalog()}
+
+    @app.put("/api/servers/{server_id}/heroine")
+    def put_heroine(server_id: str, body: HeroineIn) -> dict:
+        from .heroine import normalize_key
+
+        with session() as db:
+            server = db.get(Server, server_id)
+            if server is None:
+                raise HTTPException(404, "узел не найден")
+            try:
+                key = normalize_key(body.key)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            server.heroine_key = "" if key == "auto" else key
+            return server_view(server)
 
     @app.get("/api/warp/sites")
     def get_warp_sites() -> list:
@@ -1329,8 +1358,9 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             time.sleep(45)
             while True:
                 try:
-                    with session() as db:
-                        run_due_sources(db)
+                    from .service import run_due_sources
+
+                    run_due_sources()
                 except Exception:
                     pass
                 time.sleep(3600)

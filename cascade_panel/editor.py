@@ -191,3 +191,101 @@ def group_is_used(db: Session, group_id: str) -> bool:
 
 def chain_is_used(db: Session, chain_id: str) -> bool:
     return db.scalar(select(RoutingRule).where(RoutingRule.chain_id == chain_id)) is not None
+
+
+def parse_match(raw: str) -> dict:
+    import json
+
+    try:
+        data = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def is_catch_all(match: dict | None) -> bool:
+    match = match or {}
+    return match.get("any") is True or match.get("type") == "any"
+
+
+def _match_signature(match: dict) -> str:
+    import json
+
+    return json.dumps(match, sort_keys=True, ensure_ascii=False)
+
+
+def _gemini_family(name: str, match: dict) -> bool:
+    text = " ".join([name or "", _match_signature(match).lower()]).lower()
+    return "gemini" in text or "google-ai" in text or "google ai" in text
+
+
+def repair_routing(db) -> dict:
+    """Ловит «всё остальное» в конец и убирает дубликаты вроде Gemini / Google AI."""
+    from sqlalchemy import select
+
+    from .models import RoutingRule
+
+    rows = list(db.scalars(select(RoutingRule).order_by(RoutingRule.position, RoutingRule.name)).all())
+    removed = 0
+    seen: dict[str, RoutingRule] = {}
+    gemini: RoutingRule | None = None
+    keep: list[RoutingRule] = []
+    for row in rows:
+        match = parse_match(row.match_json)
+        sig = f"{row.action}|{row.exit_id or ''}|{row.chain_id or ''}|{row.group_id or ''}|{_match_signature(match)}"
+        name_key = (row.name or "").strip().casefold()
+        duplicate = False
+        if sig in seen:
+            duplicate = True
+        elif name_key and name_key in {k.split("name:", 1)[-1] for k in seen if k.startswith("name:")}:
+            other = seen.get(f"name:{name_key}")
+            if other is not None and other.action == row.action:
+                duplicate = True
+        if _gemini_family(row.name, match):
+            if gemini is not None and row.action == gemini.action:
+                duplicate = True
+            elif gemini is None:
+                gemini = row
+        if duplicate:
+            db.delete(row)
+            removed += 1
+            continue
+        seen[sig] = row
+        if name_key:
+            seen[f"name:{name_key}"] = row
+        keep.append(row)
+    catchalls = [row for row in keep if is_catch_all(parse_match(row.match_json))]
+    regular = [row for row in keep if row not in catchalls]
+    # Несколько ловцов: оставляем один, в конце.
+    extra = catchalls[1:]
+    for row in extra:
+        db.delete(row)
+        removed += 1
+    ordered = regular + catchalls[:1]
+    for index, row in enumerate(ordered, start=1):
+        row.position = index
+    return {"removed": removed, "count": len(ordered)}
+
+
+def pin_catch_all(db, ids: list[str] | None = None) -> list:
+    from sqlalchemy import select
+
+    from .models import RoutingRule
+
+    rows = {row.id: row for row in db.scalars(select(RoutingRule)).all()}
+    if ids is None:
+        ids = [row.id for row in sorted(rows.values(), key=lambda item: item.position)]
+    regular: list[str] = []
+    last: list[str] = []
+    for rule_id in ids:
+        row = rows.get(rule_id)
+        if row is None:
+            continue
+        if is_catch_all(parse_match(row.match_json)):
+            last.append(rule_id)
+        else:
+            regular.append(rule_id)
+    ordered_ids = regular + last
+    for index, rule_id in enumerate(ordered_ids, start=1):
+        rows[rule_id].position = index
+    return [rows[rule_id] for rule_id in ordered_ids]

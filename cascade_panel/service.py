@@ -236,15 +236,16 @@ def server_view(server: Server) -> dict:
         "precheck": json.loads(server.precheck_json) if server.precheck_json else None,
         "created_at": server.created_at.isoformat() if server.created_at else "",
         "heroine": _heroine(server),
+        "heroine_key": getattr(server, "heroine_key", "") or "auto",
         "warp": _warp_view(server),
         "protect": _protect_view(server),
     }
 
 
 def _heroine(server: Server) -> str:
-    from .heroine import heroine_path
+    from .heroine import heroine_for
 
-    return heroine_path(server.country)
+    return heroine_for(server)
 
 
 def _warp_view(server: Server) -> dict | None:
@@ -285,18 +286,46 @@ def client_view(client: Client, entry_name: str = "") -> dict:
     }
 
 
-def rule_view(rule: RoutingRule) -> dict:
+def rule_view(rule: RoutingRule, db: Session | None = None) -> dict:
+    from .editor import is_catch_all, parse_match
+
+    match = parse_match(rule.match_json)
+    exit_name = ""
+    chain_name = ""
+    group_name = ""
+    warp_target = False
+    if db is not None:
+        if rule.exit_id:
+            target = db.get(Server, rule.exit_id)
+            if target is not None:
+                exit_name = target.name
+                warp_target = bool(getattr(target, "warp_enabled", False))
+        if rule.chain_id:
+            from .models import Chain
+
+            chain = db.get(Chain, rule.chain_id)
+            if chain is not None:
+                chain_name = chain.name
+        if rule.group_id:
+            group = db.get(ExitGroup, rule.group_id)
+            if group is not None:
+                group_name = group.name
     return {
         "id": rule.id,
         "position": rule.position,
         "name": rule.name,
-        "match": json.loads(rule.match_json),
+        "match": match,
         "action": rule.action,
         "exit_id": rule.exit_id,
+        "exit_name": exit_name,
         "chain_id": rule.chain_id,
+        "chain_name": chain_name,
         "group_id": rule.group_id,
+        "group_name": group_name,
         "enabled": rule.enabled,
         "hits": rule.hits,
+        "catch_all": is_catch_all(match),
+        "warp_target": warp_target,
     }
 
 
@@ -1812,29 +1841,51 @@ def refresh_source(db: Session, source: ListSource) -> int:
     return ingest_list_text(db, source, text)
 
 
-def run_due_sources(db: Session) -> int:
+def run_due_sources(db: Session | None = None) -> int:
+    """Обновляет списки короткими транзакциями: сеть — вне сессии."""
     from datetime import datetime, timedelta, timezone
 
-    ran = 0
-    now = datetime.now(timezone.utc)
-    for source in db.scalars(select(ListSource).where(ListSource.enabled.is_(True))).all():
+    def _due(source: ListSource, now: datetime) -> bool:
         interval = source.interval_hours or 24
-        due = not source.last_fetch
-        if source.last_fetch:
-            try:
-                last = datetime.fromisoformat(source.last_fetch)
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=timezone.utc)
-                due = now - last >= timedelta(hours=interval)
-            except ValueError:
-                due = True
-        if not due:
-            continue
+        if not source.last_fetch:
+            return True
         try:
-            refresh_source(db, source)
+            last = datetime.fromisoformat(source.last_fetch)
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            return now - last >= timedelta(hours=interval)
+        except ValueError:
+            return True
+
+    now = datetime.now(timezone.utc)
+    if db is not None:
+        # Совместимость со старыми вызовами внутри уже открытой сессии.
+        due_ids = [source.id for source in db.scalars(select(ListSource).where(ListSource.enabled.is_(True))).all() if _due(source, now)]
+        ran = 0
+        for source_id in due_ids:
+            source = db.get(ListSource, source_id)
+            if source is None:
+                continue
+            try:
+                refresh_source(db, source)
+            except Exception:
+                pass
+            ran += 1
+        return ran
+
+    with session() as snap:
+        due_ids = [source.id for source in snap.scalars(select(ListSource).where(ListSource.enabled.is_(True))).all() if _due(source, now)]
+    ran = 0
+    for source_id in due_ids:
+        try:
+            with session() as item_db:
+                source = item_db.get(ListSource, source_id)
+                if source is None or not source.enabled:
+                    continue
+                refresh_source(item_db, source)
+            ran += 1
         except Exception:
-            pass
-        ran += 1
+            ran += 1
     return ran
 
 

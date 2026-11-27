@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
@@ -15,17 +15,26 @@ _engine = None
 _Session: sessionmaker[Session] | None = None
 
 
+def _apply_pragmas(dbapi_conn, _rec=None) -> None:
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA busy_timeout=8000")
+    cur.execute("PRAGMA synchronous=NORMAL")
+    cur.execute("PRAGMA foreign_keys=ON")
+    cur.close()
+
+
 def init_db(path: Path) -> None:
     global _engine, _Session
     path.parent.mkdir(parents=True, exist_ok=True)
     _engine = create_engine(
         f"sqlite:///{path}",
-        connect_args={"check_same_thread": False},
+        connect_args={"check_same_thread": False, "timeout": 30},
         future=True,
     )
+    event.listen(_engine, "connect", _apply_pragmas)
     with _engine.begin() as conn:
-        conn.exec_driver_sql("PRAGMA journal_mode=WAL")
-        conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+        _apply_pragmas(conn.connection.dbapi_connection)
     Base.metadata.create_all(_engine)
     with _engine.begin() as conn:
         _ensure_column(conn, "routing_rules", "chain_id", "VARCHAR(36)")
@@ -43,6 +52,7 @@ def init_db(path: Path) -> None:
         _ensure_column(conn, "servers", "protect_bittorrent", "BOOLEAN DEFAULT 0")
         _ensure_column(conn, "servers", "protect_private", "BOOLEAN DEFAULT 0")
         _ensure_column(conn, "servers", "protect_ads", "BOOLEAN DEFAULT 0")
+        _ensure_column(conn, "servers", "heroine_key", "VARCHAR(16) DEFAULT ''")
     _Session = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
 
 

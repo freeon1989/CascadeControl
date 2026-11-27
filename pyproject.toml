@@ -1,6 +1,6 @@
 [project]
 name = "cascade-control"
-version = "0.3.0"
+version = "0.3.1"
 description = "Локальная панель управления каскадом VPN Cascade Control"
 readme = "README.md"
 requires-python = ">=3.11"

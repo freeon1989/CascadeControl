@@ -67,6 +67,7 @@ export type Server = {
   last_error: string;
   precheck: { ok: boolean; checks: Check[] } | null;
   heroine?: string;
+  heroine_key?: string;
   warp?: WarpStatus | null;
   protect?: { bittorrent: boolean; private: boolean; ads: boolean } | null;
 };
@@ -119,10 +120,15 @@ export type Rule = {
   match: Record<string, unknown>;
   action: string;
   exit_id: string | null;
+  exit_name?: string;
   chain_id: string | null;
+  chain_name?: string;
   group_id: string | null;
+  group_name?: string;
   enabled: boolean;
   hits: number;
+  catch_all?: boolean;
+  warp_target?: boolean;
 };
 
 export type GroupMember = {

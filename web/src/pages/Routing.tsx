@@ -97,11 +97,19 @@ export function RoutingPage() {
   const [editor, setEditor] = useState<typeof emptyRule | null>(null);
   const [step, setStep] = useState(1);
   const [probeDomain, setProbeDomain] = useState("");
+  const [dragId, setDragId] = useState("");
 
-  async function load() {
+  async function loadRules() {
     try {
-      const [ruleRows, serverRows, balanceRow, addressRows, chainRows, groupRows, sourceRows, settings] = await Promise.all([
-        api<Rule[]>("/api/rules"),
+      setRules(await api<Rule[]>("/api/rules"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ошибка");
+    }
+  }
+
+  async function loadExtras() {
+    try {
+      const [serverRows, balanceRow, addressRows, chainRows, groupRows, sourceRows, settings] = await Promise.all([
         api<Server[]>("/api/servers"),
         api<typeof balance>("/api/balance"),
         api<Address[]>("/api/addresses"),
@@ -110,7 +118,6 @@ export function RoutingPage() {
         api<Source[]>("/api/sources"),
         api<{ presets: Preset[]; detect: Detect }>("/api/settings"),
       ]);
-      setRules(ruleRows);
       setServers(serverRows);
       setBalance(balanceRow);
       setAddresses(addressRows);
@@ -119,14 +126,18 @@ export function RoutingPage() {
       setSources(sourceRows);
       setPresets(settings.presets);
       setDetect(settings.detect);
-      setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "ошибка");
     }
   }
 
+  async function load() {
+    await loadRules();
+    await loadExtras();
+  }
+
   useEffect(() => {
-    void load();
+    void loadRules().then(() => void loadExtras());
   }, []);
 
   function openNew() {
@@ -143,6 +154,22 @@ export function RoutingPage() {
     if (next < 0 || next >= ids.length) return;
     [ids[index], ids[next]] = [ids[next], ids[index]];
     setRules(await api<Rule[]>("/api/rules/order", { method: "PUT", body: JSON.stringify({ ids }) }));
+  }
+
+  async function dropReorder(target: Rule) {
+    if (!rules || !dragId || dragId === target.id) return;
+    const source = rules.find((item) => item.id === dragId);
+    if (!source || source.catch_all || target.catch_all) return;
+    const ids = rules.map((item) => item.id).filter((id) => id !== dragId);
+    const at = ids.indexOf(target.id);
+    ids.splice(at, 0, dragId);
+    setDragId("");
+    try {
+      setRules(await api<Rule[]>("/api/rules/order", { method: "PUT", body: JSON.stringify({ ids }) }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ошибка");
+      await loadRules();
+    }
   }
 
   async function removeRule(rule: Rule) {
@@ -232,13 +259,22 @@ export function RoutingPage() {
             )}
             <div className="flex flex-col gap-2">
               {rules.map((rule, index) => (
-                <div key={rule.id} className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-black/20 px-3 py-3">
+                <div
+                  key={rule.id}
+                  draggable={!rule.catch_all}
+                  onDragStart={() => setDragId(rule.id)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={() => void dropReorder(rule)}
+                  className={`flex flex-wrap items-center gap-2 rounded-xl border border-line bg-black/20 px-3 py-3 ${rule.catch_all ? "" : "cursor-grab"} ${dragId === rule.id ? "opacity-60" : ""}`}
+                >
                   <span className="w-5 text-sm text-mist">{index + 1}</span>
-                  <span className="min-w-[140px] flex-1 text-sm">{rule.name}</span>
-                  <span className="text-xs text-mist">{labelMatch(rule.match)}</span>
-                  <span className={`rounded-full px-3 py-1 text-xs ${actionStyle[rule.action] || ""}`}>{actionText[rule.action] || rule.action}</span>
-                  <button className="text-xs text-mist" onClick={() => void move(rule, -1)}>вверх</button>
-                  <button className="text-xs text-mist" onClick={() => void move(rule, 1)}>вниз</button>
+                  <div className="min-w-[160px] flex-1">
+                    <div className="text-sm">{rule.name}</div>
+                    <div className="text-xs text-mist">{labelMatch(rule.match)}</div>
+                  </div>
+                  <span className={`rounded-full px-3 py-1 text-xs ${actionStyle[rule.action] || ""}`}>{actionLabel(rule)}</span>
+                  {!rule.catch_all && <button className="text-xs text-mist" onClick={() => void move(rule, -1)}>вверх</button>}
+                  {!rule.catch_all && <button className="text-xs text-mist" onClick={() => void move(rule, 1)}>вниз</button>}
                   <button className="text-xs text-teal" onClick={() => { setEditor(ruleToForm(rule)); setStep(1); }}>изменить</button>
                   <button className="text-xs text-rose" onClick={() => void removeRule(rule)}>удалить</button>
                   <Switch on={rule.enabled} label="переключить правило" onClick={() => void api(`/api/rules/${rule.id}`, { method: "PATCH", body: JSON.stringify({ enabled: !rule.enabled }) }).then(load)} />
@@ -530,13 +566,41 @@ function defaultName(editor: typeof emptyRule): string {
   return "Правило";
 }
 
+function partLabel(part: Record<string, unknown>): string {
+  if (typeof part.geosite === "string") return `geosite:${part.geosite}`;
+  if (typeof part.geoip === "string") return `geoip:${part.geoip}`;
+  if (typeof part.preset === "string") return `пресет ${part.preset}`;
+  if (typeof part.domain === "string") return String(part.domain);
+  if (typeof part.value === "string") return String(part.value);
+  return "";
+}
+
 function labelMatch(match: Record<string, unknown>): string {
   const type = typeof match.type === "string" ? match.type : "";
   const label = matchChoices.find((item) => item[0] === type)?.[1];
   if (label) return `${label}: ${match.value || "всё"}`;
-  if (match.any === true) return "всё";
+  if (match.any === true) return "всё остальное";
   if (typeof match.preset === "string") return `пресет ${match.preset}`;
+  if (Array.isArray(match.any_of)) {
+    const parts = (match.any_of as Record<string, unknown>[]).map(partLabel).filter(Boolean);
+    if (parts.length) return parts.join(", ");
+  }
+  if (typeof match.geosite === "string") return `geosite:${match.geosite}`;
+  if (typeof match.geoip === "string") return `geoip:${match.geoip}`;
   return "условие";
+}
+
+function actionLabel(rule: Rule): string {
+  if (rule.action === "exit") {
+    const name = rule.exit_name ? `Выход · ${rule.exit_name}` : "Выход";
+    return rule.warp_target ? `${name} · WARP` : name;
+  }
+  if (rule.action === "chain") return rule.chain_name ? `Каскад · ${rule.chain_name}` : "Каскад";
+  if (rule.action === "group") return rule.group_name ? `Группа · ${rule.group_name}` : "Группа выходов";
+  if (rule.action === "direct") return "Напрямую";
+  if (rule.action === "block") return "Блокировать";
+  if (rule.action === "warp") return "WARP";
+  return actionText[rule.action] || rule.action;
 }
 
 function ruleToForm(rule: Rule): typeof emptyRule {

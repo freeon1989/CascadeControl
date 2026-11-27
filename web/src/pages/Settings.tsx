@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { SourceError } from "../sourceError";
 import { Banner, Page } from "./Overview";
+import { UpdateCard } from "./UpdateCard";
 
 type Settings = {
   version: string;
@@ -78,6 +79,7 @@ export function SettingsPage() {
             )}
             {message && <p className="mt-2 text-xs text-teal">{message}</p>}
           </section>
+          <UpdateCard />
           <section className="card p-4">
             <h2 className="font-semibold">Источники списков</h2>
             <div className="mt-3 flex flex-col gap-3">

@@ -99,6 +99,43 @@ WantedBy=multi-user.target
 """
 
 
+def render_agent_update_script() -> str:
+    """Меняет бинарник агента и перезапускает его. Прежний бинарник хранится для отката."""
+    lines = [
+        "#!/bin/bash",
+        "set -u",
+        "log() { echo \"CASCADE_LOG $*\"; }",
+        "if [ \"$(id -u)\" -ne 0 ]; then SUDO=\"sudo -n\"; else SUDO=; fi",
+        "NEW=/opt/cascade/bin/cascade-agent.new",
+        "if [ ! -s \"$NEW\" ]; then log новый бинарник агента не загружен; exit 1; fi",
+        "chmod 0755 \"$NEW\"",
+        "newver=$(\"$NEW\" -version 2>/dev/null | head -n1 || true)",
+        "if [ -z \"$newver\" ]; then log новый бинарник не запускается; rm -f \"$NEW\"; exit 1; fi",
+        "log версия нового агента: $newver",
+        "if [ -f /usr/local/bin/cascade-agent ]; then $SUDO cp -f /usr/local/bin/cascade-agent /opt/cascade/bin/cascade-agent.prev; fi",
+        "$SUDO install -m 0755 \"$NEW\" /usr/local/bin/cascade-agent",
+        "$SUDO cp /opt/cascade/agent/cascade-agent.service /etc/systemd/system/cascade-agent.service",
+        "$SUDO systemctl daemon-reload",
+        "$SUDO systemctl enable cascade-agent >/dev/null 2>&1 || true",
+        "$SUDO systemctl restart cascade-agent",
+        "sleep 2",
+        "state=$($SUDO systemctl is-active cascade-agent || true)",
+        "log агент: $state",
+        "if [ \"$state\" != active ]; then",
+        "  $SUDO journalctl -u cascade-agent -n 30 --no-pager || true",
+        "  if [ -f /opt/cascade/bin/cascade-agent.prev ]; then",
+        "    log возвращаю прежний бинарник",
+        "    $SUDO install -m 0755 /opt/cascade/bin/cascade-agent.prev /usr/local/bin/cascade-agent",
+        "    $SUDO systemctl restart cascade-agent || true",
+        "  fi",
+        "  exit 1",
+        "fi",
+        "$SUDO mv -f \"$NEW\" /opt/cascade/bin/cascade-agent",
+        "exit 0",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def firewall_lines(ports: list[tuple[int, str]]) -> list[str]:
     """Открывает публичные порты в ufw, firewalld, iptables и отдельной таблице nft.
 

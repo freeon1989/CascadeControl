@@ -13,6 +13,7 @@ export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree,mshtml=}"
 PY_WIN="C:\\Python312\\python.exe"
 DIST_DIR="$ROOT/dist/CascadeControl"
 STAGE="$ROOT/build/windows-zip"
+# Имя архива стабильное: приложение само ищет именно его в последнем релизе.
 ZIP_PATH="${1:-$ROOT/build/CascadeControl-windows-x64.zip}"
 
 need() {
@@ -31,13 +32,20 @@ fi
 npm --prefix web run build
 test -f web/dist/index.html
 
+VERSION="$(python3 -c "import re,pathlib;print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('cascade_panel/__init__.py').read_text()).group(1))")"
+echo "версия $VERSION"
+
 echo "== агент linux/amd64 =="
 mkdir -p agent/dist
 (
   cd agent
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o "$ROOT/agent/dist/cascade-agent" ./cmd/cascade-agent
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w -X main.Version=$VERSION" -o "$ROOT/agent/dist/cascade-agent" ./cmd/cascade-agent
 )
-file agent/dist/cascade-agent | grep -q "ELF 64-bit LSB executable, x86-64"
+python3 - << 'PYEOF'
+# ELF64, little-endian, x86-64 (без утилиты file, её может не быть)
+head = open("agent/dist/cascade-agent", "rb").read(20)
+assert head[:4] == b"\x7fELF" and head[4] == 2 and head[5] == 1 and head[18:20] == b"\x3e\x00", "агент не linux/amd64"
+PYEOF
 
 echo "== Windows Python в Wine =="
 if ! xvfb-run -a wine "$PY_WIN" -c "import sys; print(sys.version)"; then
@@ -74,9 +82,13 @@ xvfb-run -a wine "$PY_WIN" -m pip install --disable-pip-version-check --no-build
 xvfb-run -a wine "$PY_WIN" -m pip install --disable-pip-version-check --no-deps "pywebview==5.4"
 
 echo "== PyInstaller (onedir) =="
-rm -rf build/cascade-panel dist/CascadeControl
+rm -rf build/cascade-panel build/cascade-updater dist/CascadeControl dist/CascadeUpdater.exe
 xvfb-run -a wine "$PY_WIN" -m PyInstaller --noconfirm --clean cascade-panel.spec
 test -f "$DIST_DIR/CascadeControl.exe"
+echo "== установщик обновлений (CascadeUpdater.exe) =="
+xvfb-run -a wine "$PY_WIN" -m PyInstaller --noconfirm --clean cascade-updater.spec
+test -f dist/CascadeUpdater.exe
+cp dist/CascadeUpdater.exe "$DIST_DIR/CascadeUpdater.exe"
 
 echo "== zip =="
 rm -rf "$STAGE"
@@ -93,5 +105,6 @@ rm -f "$ZIP_PATH"
   cd "$STAGE"
   zip -r -q "$ZIP_PATH" CascadeControl
 )
-sha256sum "$ZIP_PATH" | tee "$ZIP_PATH.sha256"
+# Формат «<sha256>  <имя файла>» без пути: его читает само приложение и sha256sum -c.
+(cd "$(dirname "$ZIP_PATH")" && sha256sum "$(basename "$ZIP_PATH")" | tee "$(basename "$ZIP_PATH").sha256")
 echo "готово: $ZIP_PATH"

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -19,6 +20,9 @@ import (
 	"cascade-agent/internal/xraypatch"
 )
 
+// Version подставляется при сборке: -ldflags "-X main.Version=0.2.0".
+var Version = "dev"
+
 type exitStatus struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
@@ -30,6 +34,7 @@ type exitStatus struct {
 }
 
 type statusDoc struct {
+	Version  string         `json:"version"`
 	Updated  string         `json:"updated"`
 	Strategy string         `json:"strategy"`
 	Active   []string       `json:"active"`
@@ -49,7 +54,12 @@ func main() {
 	configPath := flag.String("config", "/etc/cascade-agent/config.json", "путь к конфигурации")
 	statusPath := flag.String("status", "/var/lib/cascade-agent/status.json", "куда писать состояние")
 	once := flag.Bool("once", false, "один проход без цикла")
+	showVersion := flag.Bool("version", false, "показать версию и выйти")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(Version)
+		return
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -191,6 +201,7 @@ func writeStatus(path string, cfg config.File, health map[string]failover.Health
 		selected[id] = true
 	}
 	doc := statusDoc{
+		Version:  Version,
 		Updated:  time.Now().UTC().Format(time.RFC3339),
 		Strategy: cfg.Strategy,
 		Active:   active,

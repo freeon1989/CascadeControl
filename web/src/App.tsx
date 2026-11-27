@@ -8,6 +8,7 @@ import { ClientsPage } from "./pages/Clients";
 import { JournalPage } from "./pages/Journal";
 import { MonitorPage } from "./pages/Monitor";
 import { SettingsPage } from "./pages/Settings";
+import { useUpdateStatus } from "./pages/UpdateCard";
 
 const links = [
   ["/", "Обзор"],
@@ -22,6 +23,8 @@ const links = [
 
 export function App() {
   const [open, setOpen] = useState(false);
+  const { status: update } = useUpdateStatus(false);
+  const offer = update && update.available && !update.skipped && update.auto_check ? update.latest : null;
   return (
     <div className="shell">
       <aside className={open ? "side open" : "side"}>
@@ -48,7 +51,12 @@ export function App() {
             </NavLink>
           ))}
         </nav>
-        <div className="mt-auto card p-3">
+        {offer && (
+          <NavLink to="/settings" onClick={() => setOpen(false)} className="mt-auto mb-3 block rounded-xl border border-teal/40 bg-teal/10 p-3 text-xs text-teal">
+            Вышла версия {offer.version}. Открыть «Настройки», чтобы обновиться.
+          </NavLink>
+        )}
+        <div className={offer ? "card p-3" : "mt-auto card p-3"}>
           <div className="flex items-center gap-2 text-sm text-ok">
             <span className="h-2 w-2 rounded-full bg-ok" /> Система
           </div>

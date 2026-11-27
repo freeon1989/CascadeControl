@@ -54,10 +54,12 @@ export type Server = {
     online: boolean | null;
     docker: string;
     agent: string;
+    agent_version?: string;
     xray: string;
     awg: { up: boolean; handshakes: number } | null;
     awg_sync: { ok: boolean; at: string; message: string } | null;
   };
+  agent_update?: { panel: string; agent: string; known: boolean; outdated: boolean } | null;
   share: number | null;
   speed_mbps: number | null;
   spark: number[];
@@ -171,3 +173,27 @@ export const flag: Record<string, string> = {
 export function formatHits(value: number): string {
   return new Intl.NumberFormat("ru-RU").format(value);
 }
+
+export type UpdateRelease = {
+  version: string;
+  tag: string;
+  name: string;
+  notes: string;
+  url: string;
+  published_at: string;
+  has_assets: boolean;
+};
+
+export type UpdateStatus = {
+  current: string;
+  latest: UpdateRelease | null;
+  available: boolean;
+  skipped: boolean;
+  auto_check: boolean;
+  skipped_version: string;
+  last_check: string;
+  check_error: string;
+  can_apply: boolean;
+  job: { state: string; progress: number; message: string; error: string };
+  result: { ok: boolean; rolled_back: boolean; version: string; wanted?: string; previous?: string; error?: string } | null;
+};

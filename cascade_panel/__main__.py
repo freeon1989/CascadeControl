@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import socket
 import sys
 import threading
@@ -71,6 +72,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=port())
     parser.add_argument("--webview", action="store_true", help="окно Edge WebView2 (Windows)")
     args = parser.parse_args(argv)
+    os.environ["CASCADE_PORT"] = str(args.port)  # им пользуется установщик обновлений
     application = create_app()
     url = f"http://{HOST}:{args.port}"
     if args.webview:

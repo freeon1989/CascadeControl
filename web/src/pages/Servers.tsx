@@ -56,6 +56,14 @@ export function ServersPage() {
         const job = await api<{ job_id: string }>(`/api/servers/${id}`, { method: "DELETE" });
         await waitJob(job.job_id);
       } else {
+        if (action === "agent-update") {
+          if (!confirm("Обновить агента на входном сервере? Новый файл загрузится по SSH, служба cascade-agent перезапустится на пару секунд. Клиенты, Xray и AmneziaWG не затрагиваются. Если новая служба не поднимется, вернётся прежняя версия.")) return;
+          const job = await api<{ job_id: string }>(`/api/servers/${id}/agent-update`, { method: "POST", body: JSON.stringify({ confirm: true }) });
+          const result = await waitJob(job.job_id);
+          if (!result.ok) setError(result.lines[result.lines.length - 1] || "обновление агента не удалось");
+          await load();
+          return;
+        }
         if (action === "reconfigure" && !confirm("Перенастроить сервер? Текущие настройки запишутся по SSH заново. Сервер из списка не удалится, контейнеры amnezia-* не трогаются.")) return;
         const job = await api<{ job_id: string }>(`/api/servers/${id}/${action}`, { method: "POST" });
         const result = await waitJob(job.job_id);
@@ -106,7 +114,7 @@ export function ServersPage() {
                       ))}
                       <span className="rounded-md bg-white/5 px-2 py-0.5 text-xs text-mist">Hysteria2 выкл</span>
                     </div>
-                    <ProtocolLive live={row.live} />
+                    <ProtocolLive live={row.live} agentUpdate={row.agent_update} />
                   </td>
                   <td className="px-3 py-3">
                     <div>{row.cpu != null ? `${row.cpu}%` : "—"}</div>
@@ -134,6 +142,9 @@ export function ServersPage() {
                       <Mini disabled={busy !== ""} onClick={() => act(row.id, "precheck")}>Перепроверить</Mini>
                       <Mini disabled={busy !== ""} onClick={() => act(row.id, "reconfigure")}>Перенастроить</Mini>
                       <Mini disabled={busy !== ""} onClick={() => act(row.id, "update")}>Обновить</Mini>
+                      {row.agent_update?.outdated && (
+                        <Mini disabled={busy !== ""} onClick={() => act(row.id, "agent-update")}>Обновить агент</Mini>
+                      )}
                       <Mini disabled={busy !== ""} onClick={() => act(row.id, "reinstall")}>Переустановить</Mini>
                       <Mini disabled={busy !== ""} onClick={() => act(row.id, "remove")}>Удалить</Mini>
                     </div>
@@ -163,16 +174,25 @@ export function ServersPage() {
   );
 }
 
-function ProtocolLive({ live }: { live?: Server["live"] }) {
+function ProtocolLive({ live, agentUpdate }: { live?: Server["live"]; agentUpdate?: Server["agent_update"] }) {
   if (!live) return null;
   const bits: string[] = [];
   if (live.awg) bits.push(`AWG: ${live.awg.handshakes} рукопожатий`);
   if (live.xray === "active") bits.push("Xray: активен");
   else if (live.xray && live.xray !== "missing") bits.push("Xray: нет");
-  if (live.agent === "active") bits.push("агент: работает");
+  if (live.agent === "active") bits.push(live.agent_version ? `агент ${live.agent_version}: работает` : "агент: работает");
   if (live.docker === "active") bits.push("Docker: работает");
-  if (!bits.length) return null;
-  return <div className="mt-1 text-[11px] text-mist">{bits.join(" · ")}</div>;
+  if (!bits.length && !agentUpdate?.outdated) return null;
+  return (
+    <div className="mt-1 text-[11px] text-mist">
+      {bits.join(" · ")}
+      {agentUpdate?.outdated && (
+        <div className="text-amber-300">
+          Агент {agentUpdate.known ? agentUpdate.agent : "старой версии"} старше панели {agentUpdate.panel}. Можно обновить кнопкой справа.
+        </div>
+      )}
+    </div>
+  );
 }
 
 function checkedLabel(value: string): string {

@@ -1,0 +1,65 @@
+name: release
+
+# Выпуск по тегу vX.Y.Z. Версия в cascade_panel/__init__.py должна совпадать с тегом.
+# Приложение ищет в последнем релизе два файла со стабильными именами:
+#   CascadeControl-windows-x64.zip и CascadeControl-windows-x64.zip.sha256
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    # Если релиз с этим тегом уже опубликован вручную (scripts/publish_release.sh), CI его не трогает.
+    runs-on: ubuntu-latest
+    outputs:
+      exists: ${{ steps.probe.outputs.exists }}
+    steps:
+      - id: probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  windows:
+    needs: check
+    if: needs.check.outputs.exists != 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Check tag matches version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path cascade_panel\__init__.py -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != version v$v" }
+      - name: Tests
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pytest
+      - name: Build
+        shell: pwsh
+        run: ./scripts/build_windows.ps1
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "docs/release-notes/${{ github.ref_name }}.md"
+          if (Test-Path $notes) { $args = @("--notes-file", $notes) } else { $args = @("--generate-notes") }
+          gh release create "${{ github.ref_name }}" build/CascadeControl-windows-x64.zip build/CascadeControl-windows-x64.zip.sha256 --title "Cascade Control ${{ github.ref_name }}" @args

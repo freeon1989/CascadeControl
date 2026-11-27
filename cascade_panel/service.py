@@ -167,6 +167,27 @@ def _listening_fields(server: Server) -> list[dict]:
     return listening_fields(server)
 
 
+def agent_update_info(server: Server, stats: dict) -> dict | None:
+    """Только для входа с агентом: устарел ли агент относительно панели."""
+    from . import __version__
+    from .semver import is_newer
+
+    if server.role != "entry" or server.demo:
+        return None
+    checked = bool(stats.get("checked_at")) and stats.get("online") is not False
+    version = stats.get("agent_version") or ""
+    state = stats.get("agent") or ""
+    if not checked or state == "missing":
+        return {"panel": __version__, "agent": version, "outdated": False, "known": bool(version)}
+    return {
+        "panel": __version__,
+        "agent": version,
+        "known": bool(version),
+        # Версию старого агента (до 0.2.0) узнать нельзя: считаем его старше панели.
+        "outdated": (not version) or is_newer(__version__, version),
+    }
+
+
 def server_view(server: Server) -> dict:
     stats = _stats(server)
     ids = protocol_ids(server)
@@ -201,10 +222,12 @@ def server_view(server: Server) -> dict:
             "online": stats.get("online"),
             "docker": stats.get("docker") or "",
             "agent": stats.get("agent") or "",
+            "agent_version": stats.get("agent_version") or "",
             "xray": stats.get("xray") or "",
             "awg": stats.get("awg"),
             "awg_sync": stats.get("awg_sync"),
         },
+        "agent_update": agent_update_info(server, stats),
         "share": stats.get("share"),
         "speed_mbps": stats.get("speed_mbps"),
         "spark": stats.get("spark") or [],
@@ -572,7 +595,7 @@ def refresh_status(server_id: str) -> Server:
         }
     )
     if remote:
-        for key in ("cpu", "ram", "disk", "uptime", "docker", "agent", "xray", "awg"):
+        for key in ("cpu", "ram", "disk", "uptime", "docker", "agent", "agent_version", "xray", "awg"):
             if key in remote:
                 merged[key] = remote[key]
     with session() as db:
@@ -1384,6 +1407,46 @@ def install_worker(job_id: str, server_id: str | None, finish: bool = True) -> N
                 server.status = "online"
                 server.config_dirty = False
                 server.last_error = ""
+
+
+def agent_update_worker(job_id: str, server_id: str | None) -> None:
+    """Обновляет только агента на входе: заливает новый бинарник и перезапускает службу cascade-agent.
+
+    Конфиг, Xray, AmneziaWG и клиенты не трогаются. Если новая служба не поднялась,
+    возвращается прежний бинарник.
+    """
+    from .bundle import agent_unit, render_agent_update_script
+    from .settings import agent_binary
+
+    assert server_id
+    with session() as db:
+        server = db.get(Server, server_id)
+        if server is None:
+            raise ValueError("узел не найден")
+        if server.role != "entry":
+            raise ValueError("агент стоит только на входном узле")
+        if server.demo:
+            _log(job_id, "agent", "демо-узел по SSH не обновляется", "warn")
+            _finish(job_id, "done", server_id)
+            return
+    blob = agent_binary()
+    if not blob.exists():
+        raise ValueError("в этой сборке нет бинарника агента")
+    binary = blob.read_bytes()
+    with session() as db:
+        server = db.get(Server, server_id)
+        assert server
+        ssh_cm = connect(server)
+    with ssh_cm as ssh:
+        ssh.write_file("/opt/cascade/bin/cascade-agent.new", binary, 0o755)
+        _log(job_id, "agent", "новый бинарник агента записан")
+        ssh.write_file("/opt/cascade/agent/cascade-agent.service", agent_unit().encode("utf-8"), 0o644)
+        ssh.write_file("/opt/cascade/agent/update.sh", render_agent_update_script().encode("utf-8"), 0o700)
+        code = ssh.run("bash /opt/cascade/agent/update.sh", lambda line: _log(job_id, "agent", line))
+    if code != 0:
+        raise SSHError(f"обновление агента завершилось с кодом {code}, прежняя версия возвращена")
+    _log(job_id, "agent", "агент обновлён")
+    _finish(job_id, "done", server_id)
 
 
 def reconfigure_worker(job_id: str, server_id: str | None) -> None:

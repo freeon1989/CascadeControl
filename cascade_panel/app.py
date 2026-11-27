@@ -13,8 +13,23 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+
+
+class UpdateSettingsIn(BaseModel):
+    auto_check: bool | None = None
+    skipped_version: str | None = Field(default=None, max_length=40)
+
+
+class UpdateInstallIn(BaseModel):
+    version: str = Field(max_length=40)
+    confirm: bool = False
+
+
+class AgentUpdateIn(BaseModel):
+    confirm: bool = False
 
 
 class DnsLogIn(BaseModel):
@@ -23,7 +38,7 @@ class DnsLogIn(BaseModel):
     retention_hours: int = 24
     cap_mb: int = 50
 
-from . import __version__
+from . import __version__, updater
 from .editor import (
     chain_is_used,
     group_is_used,
@@ -47,6 +62,7 @@ from .service import (
     create_client,
     create_server,
     reconfigure_worker,
+    agent_update_worker,
     refresh_status,
     monitor_board,
     monitor_detail,
@@ -246,6 +262,17 @@ class UTF8JSONResponse(JSONResponse):
     media_type = "application/json; charset=utf-8"
 
 
+def _listen_port() -> int:
+    from .settings import port
+
+    return port()
+
+
+def _exit_hook() -> None:
+    """Закрывает панель после того, как запущен CascadeUpdater. Заменить файлы работающей программы нельзя."""
+    os._exit(0)
+
+
 def create_app(database: Path | None = None, do_seed: bool | None = None) -> FastAPI:
     init_db(database or db_path())
     app = FastAPI(
@@ -255,8 +282,8 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
         default_response_class=UTF8JSONResponse,
     )
 
-    @app.exception_handler(HTTPException)
-    async def utf8_http_error(_request, exc: HTTPException):
+    @app.exception_handler(StarletteHTTPException)
+    async def utf8_http_error(_request, exc: StarletteHTTPException):
         return UTF8JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     with session() as db:
         if (do_seed if do_seed is not None else seed_enabled()):
@@ -426,6 +453,19 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             if db.get(Server, server_id) is None:
                 raise HTTPException(404, "узел не найден")
         return {"job_id": start_job("reconfigure", server_id, reconfigure_worker)}
+
+    @app.post("/api/servers/{server_id}/agent-update")
+    def post_agent_update(server_id: str, body: AgentUpdateIn) -> dict:
+        """Обновляет агента на входе. Только после явного подтверждения, на сервер ничего не уходит сразу."""
+        if not body.confirm:
+            raise HTTPException(400, "нужно подтверждение: агент на сервере будет перезапущен")
+        with session() as db:
+            server = db.get(Server, server_id)
+            if server is None:
+                raise HTTPException(404, "узел не найден")
+            if server.role != "entry":
+                raise HTTPException(400, "агент стоит только на входном узле")
+        return {"job_id": start_job("agent-update", server_id, agent_update_worker)}
 
     @app.delete("/api/servers/{server_id}")
     def delete_server(server_id: str) -> dict:
@@ -1091,6 +1131,35 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             clear_demo(db)
         return {"ok": True}
 
+    @app.get("/api/update")
+    def get_update() -> dict:
+        return updater.status()
+
+    @app.post("/api/update/check")
+    def post_update_check() -> dict:
+        result = updater.check(manual=True)
+        return result
+
+    @app.put("/api/update/settings")
+    def put_update_settings(body: UpdateSettingsIn) -> dict:
+        try:
+            updater.set_prefs(body.auto_check, body.skipped_version)
+        except updater.UpdateError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return updater.status()
+
+    @app.post("/api/update/install")
+    def post_update_install(body: UpdateInstallIn) -> dict:
+        try:
+            return updater.start_install(body.version, _listen_port(), _exit_hook, confirm=body.confirm)
+        except updater.UpdateError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/update/ack")
+    def post_update_ack() -> dict:
+        updater.acknowledge_result()
+        return {"ok": True}
+
     dist = web_dist()
     index = dist / "index.html"
     if index.exists():
@@ -1121,6 +1190,7 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             )
 
     if os.environ.get("CASCADE_SCHEDULER", "1") != "0":
+        updater.start_auto_check()
 
         def _refresh_loop() -> None:
             import time

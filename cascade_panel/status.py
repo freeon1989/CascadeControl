@@ -380,6 +380,22 @@ if code == 0:
     awg = {"up": True, "handshakes": out.count("latest handshake:")}
 
 agent_peers = None
+agent_version = ""
+
+def read_agent_version():
+    # Версия работающего агента: из его status.json, иначе из самого бинарника.
+    try:
+        doc = json.load(open("/var/lib/cascade-agent/status.json", encoding="utf-8"))
+        if isinstance(doc, dict) and isinstance(doc.get("version"), str) and doc["version"]:
+            return doc["version"][:40]
+    except (OSError, ValueError):
+        pass
+    status, text = run(["/usr/local/bin/cascade-agent", "-version"], timeout=5)
+    if status == 0 and text.strip():
+        return text.strip().splitlines()[0][:40]
+    return ""
+
+agent_version = read_agent_version()
 
 def awg_dump():
     global agent_peers
@@ -537,6 +553,7 @@ payload = {
     "uptime": uptime_text(),
     "docker": docker,
     "agent": unit("cascade-agent"),
+    "agent_version": agent_version,
     "xray": unit("cascade-xray"),
     "awg": awg,
     "awg_dump": dump,

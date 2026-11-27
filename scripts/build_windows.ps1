@@ -7,12 +7,12 @@ python -m pip install -r requirements.txt pyinstaller pywebview
 npm --prefix web ci
 npm --prefix web run build
 
+$version = (Select-String -Path cascade_panel\__init__.py -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
 New-Item -ItemType Directory -Force -Path agent\dist | Out-Null
 $env:CGO_ENABLED = "0"
 $env:GOOS = "linux"
 $env:GOARCH = "amd64"
 Push-Location agent
-$version = (Select-String -Path cascade_panel\__init__.py -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
 go build -ldflags "-s -w -X main.Version=$version" -o dist\cascade-agent .\cmd\cascade-agent
 Pop-Location
 

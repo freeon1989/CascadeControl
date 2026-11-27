@@ -172,17 +172,42 @@ def transit_config(
     }
 
 
-def exit_config(*, inbound: RealityMaterial, inbound_users: list[dict]) -> dict:
+def exit_config(
+    *,
+    inbound: RealityMaterial,
+    inbound_users: list[dict],
+    protections: dict | None = None,
+    warp: dict | None = None,
+) -> dict:
+    """Конфиг выхода. Защита и WARP для отдельных сайтов — только если включены."""
+    from .warp import compile_warp_matchers, protection_rules, wireguard_outbound
+
+    protect = protections or {}
+    rules = protection_rules(
+        bittorrent=bool(protect.get("bittorrent")),
+        private=bool(protect.get("private")),
+        ads=bool(protect.get("ads")),
+    )
+    outbounds: list[dict] = [
+        {"tag": "direct", "protocol": "freedom"},
+        {"tag": "block", "protocol": "blackhole"},
+    ]
+    warp = warp or {}
+    if warp.get("enabled") and warp.get("mode") == "sites" and warp.get("account"):
+        outbounds.append(wireguard_outbound("warp", warp["account"], masque=False))
+        if warp.get("masque_account") or warp.get("masque"):
+            outbounds.append(wireguard_outbound("warp-masque", warp["account"], masque=True))
+        domains, ips = compile_warp_matchers(warp.get("sites") or [])
+        if domains:
+            rules.append({"type": "field", "domain": domains, "outboundTag": "warp"})
+        if ips:
+            rules.append({"type": "field", "ip": ips, "outboundTag": "warp"})
+    rules.append({"type": "field", "network": "tcp,udp", "outboundTag": "direct"})
     return {
         "log": {"loglevel": "warning"},
         "inbounds": [_reality_inbound("from-transit", inbound, inbound_users)],
-        "outbounds": [
-            {"tag": "direct", "protocol": "freedom"},
-            {"tag": "block", "protocol": "blackhole"},
-        ],
-        "routing": {
-            "rules": [{"type": "field", "network": "tcp,udp", "outboundTag": "direct"}],
-        },
+        "outbounds": outbounds,
+        "routing": {"domainStrategy": "IPIfNonMatch", "rules": rules},
     }
 
 

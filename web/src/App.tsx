@@ -1,5 +1,5 @@
 import { NavLink, Route, Routes } from "react-router-dom";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { OverviewPage } from "./pages/Overview";
 import { ServersPage } from "./pages/Servers";
 import { RoutingPage } from "./pages/Routing";
@@ -21,10 +21,31 @@ const links = [
   ["/settings", "Настройки"],
 ];
 
+function currentTheme(): "dark" | "light" {
+  const saved = localStorage.getItem("cascade-theme");
+  if (saved === "light" || saved === "dark") return saved;
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+
 export function App() {
   const [open, setOpen] = useState(false);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const { status: update } = useUpdateStatus(false);
   const offer = update && update.available && !update.skipped && update.auto_check ? update.latest : null;
+
+  useEffect(() => {
+    const next = currentTheme();
+    setTheme(next);
+    document.documentElement.setAttribute("data-theme", next);
+  }, []);
+
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    localStorage.setItem("cascade-theme", next);
+    document.documentElement.setAttribute("data-theme", next);
+  }
+
   return (
     <div className="shell">
       <aside className={open ? "side open" : "side"}>
@@ -61,6 +82,9 @@ export function App() {
             <span className="h-2 w-2 rounded-full bg-ok" /> Система
           </div>
           <div className="mt-1 text-xs text-mist">Панель только на 127.0.0.1</div>
+          <button className="mt-3 w-full rounded-lg border border-line px-2 py-1 text-xs text-mist" onClick={toggleTheme}>
+            {theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+          </button>
         </div>
       </aside>
       <div>

@@ -235,7 +235,32 @@ def server_view(server: Server) -> dict:
         "last_error": server.last_error,
         "precheck": json.loads(server.precheck_json) if server.precheck_json else None,
         "created_at": server.created_at.isoformat() if server.created_at else "",
+        "heroine": _heroine(server),
+        "warp": _warp_view(server),
+        "protect": _protect_view(server),
     }
+
+
+def _heroine(server: Server) -> str:
+    from .heroine import heroine_path
+
+    return heroine_path(server.country)
+
+
+def _warp_view(server: Server) -> dict | None:
+    from .options import EXIT_ROLES, warp_of
+
+    if server.role not in EXIT_ROLES:
+        return None
+    return warp_of(server)
+
+
+def _protect_view(server: Server) -> dict | None:
+    from .options import EXIT_ROLES, protections_of
+
+    if server.role not in EXIT_ROLES:
+        return None
+    return protections_of(server)
 
 
 def client_view(client: Client, entry_name: str = "") -> dict:
@@ -985,9 +1010,10 @@ def connect(server: Server, timeout: float | None = None):
         raise SSHError("это демонстрационный узел, SSH к нему не открывается")
     if _connector is not None:
         return _connector(server)
-    secret = _box().decrypt(server.ssh_secret_enc)
-    target = SSHTarget(server.host, server.ssh_port, server.ssh_user, server.auth_type, secret)
-    return ParamikoSession(target, timeout=timeout or 25.0)
+    from .options import plan_for
+
+    target, jump = plan_for(server)
+    return ParamikoSession(target, timeout=timeout or 25.0, jump=jump)
 
 
 def _log(job_id: str, step: str, message: str, level: str = "info") -> None:
@@ -1114,6 +1140,8 @@ def assemble(db: Session):
             accept = first_transit.node_uuid if first_transit else entry.node_uuid
         else:
             accept = server.node_uuid
+        from .options import EXIT_ROLES, protections_of, warp_plan_for_exit
+
         nodes.append(
             {
                 "id": server.id,
@@ -1122,6 +1150,8 @@ def assemble(db: Session):
                 "role": server.role,
                 "awg_port": server.awg_port,
                 "accept_uuid": accept,
+                "protections": protections_of(server) if server.role in EXIT_ROLES else None,
+                "warp": warp_plan_for_exit(db, server) if server.role in EXIT_ROLES else None,
             }
         )
     users = []
@@ -1739,15 +1769,15 @@ def ingest_list_text(db: Session, source: ListSource, text: str) -> int:
     elif source.kind == "cidr":
         values = parse_cidr_list(text)
         kind = "cidr"
-    elif source.kind == "geosite-dat":
-        raise ValueError("geosite.dat обновляется кнопкой «Обновить сейчас», не текстом")
+    elif source.kind in {"geosite-dat", "geoip-dat"}:
+        raise ValueError("файлы geosite.dat и geoip.dat обновляются кнопкой «Обновить сейчас», не текстом")
     else:
         raise ValueError("этот формат списка не разбирается")
     return ingest_values(db, source, kind, values)
 
 
 def refresh_source(db: Session, source: ListSource) -> int:
-    from .lists import fetch_bytes, parse_geosite_dat
+    from .lists import fetch_bytes, parse_geoip_dat, parse_geosite_dat
 
     try:
         if source.kind == "geosite-dat":
@@ -1759,6 +1789,15 @@ def refresh_source(db: Session, source: ListSource) -> int:
                 note = f"взяты первые 4000 из {len(domains)}"
                 domains = domains[:4000]
             return ingest_values(db, source, "domain", domains, note)
+        if source.kind == "geoip-dat":
+            parsed = parse_geoip_dat(fetch_bytes(source.url))
+            selector = (source.selector or "RU").upper()
+            cidrs = [name for code, names in parsed.items() if code.upper() == selector for name in names]
+            note = ""
+            if len(cidrs) > 4000:
+                note = f"взяты первые 4000 из {len(cidrs)}"
+                cidrs = cidrs[:4000]
+            return ingest_values(db, source, "cidr", cidrs, note)
         text = fetch_text(source.url)
     except Exception as exc:  # noqa: BLE001
         from .lists import FetchError
@@ -1835,12 +1874,15 @@ def decide(db: Session, host: str | None, ip: str | None) -> dict:
             except ValueError:
                 continue
     decision = evaluate(_rules(db), host, ip, catalog)
-    return {
+    payload = {
         "rule_id": decision.rule_id,
         "action": decision.action,
         "exit_id": decision.exit_id,
         "reason": decision.reason,
     }
+    from .options import enrich_decision
+
+    return enrich_decision(db, host, ip, payload)
 
 
 def overview(db: Session) -> dict:
@@ -2002,7 +2044,14 @@ def settings_view(db: Session) -> dict:
         ],
         "detect": detect_view(db),
         "hysteria2": hysteria_plan(),
+        "ssh_via_entry": _ssh_via_entry(db),
     }
+
+
+def _ssh_via_entry(db: Session) -> bool:
+    from .options import ssh_via_entry
+
+    return ssh_via_entry(db)
 
 
 def preset_enabled_map(db: Session) -> dict:

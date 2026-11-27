@@ -54,9 +54,19 @@ DEFAULT_SOURCES = [
     },
     {
         "id": "runetfreedom-geosite",
-        "title": "runetfreedom geosite.dat",
+        "title": "runetfreedom geosite.dat (RU)",
         "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat",
         "kind": "geosite-dat",
+        "action": "direct",
+        "enabled": False,
+        "interval_hours": 24,
+        "selector": "RU",
+    },
+    {
+        "id": "runetfreedom-geoip",
+        "title": "runetfreedom geoip.dat (RU)",
+        "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat",
+        "kind": "geoip-dat",
         "action": "direct",
         "enabled": False,
         "interval_hours": 24,
@@ -163,6 +173,44 @@ def parse_geosite_dat(data: bytes) -> dict[str, list[str]]:
         if code:
             bucket = found.setdefault(code, [])
             bucket.extend(domains)
+    return found
+
+
+def parse_geoip_dat(data: bytes) -> dict[str, list[str]]:
+    """Разбор v2ray geoip.dat: код страны и список CIDR."""
+    found: dict[str, list[str]] = {}
+    for field, payload in _walk_protobuf(data):
+        if field != 1 or isinstance(payload, int):
+            continue
+        code = ""
+        cidrs: list[str] = []
+        for inner, value in _walk_protobuf(payload):
+            if inner == 1 and isinstance(value, bytes):
+                code = value.decode("utf-8", "replace").strip()
+            elif inner == 2 and isinstance(value, bytes):
+                ip_bytes = b""
+                prefix = None
+                for leaf, leaf_value in _walk_protobuf(value):
+                    if leaf == 1 and isinstance(leaf_value, bytes):
+                        ip_bytes = leaf_value
+                    elif leaf == 2 and isinstance(leaf_value, int):
+                        prefix = leaf_value
+                if not ip_bytes:
+                    continue
+                try:
+                    if len(ip_bytes) == 4:
+                        addr = ipaddress.IPv4Address(ip_bytes)
+                        bits = 32 if prefix is None else prefix
+                    elif len(ip_bytes) == 16:
+                        addr = ipaddress.IPv6Address(ip_bytes)
+                        bits = 128 if prefix is None else prefix
+                    else:
+                        continue
+                    cidrs.append(str(ipaddress.ip_network(f"{addr}/{bits}", strict=False)))
+                except ValueError:
+                    continue
+        if code:
+            found.setdefault(code, []).extend(cidrs)
     return found
 
 

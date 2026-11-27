@@ -36,6 +36,13 @@ def init_db(path: Path) -> None:
         _ensure_column(conn, "clients", "counters_json", "TEXT DEFAULT '{}'")
         _ensure_column(conn, "servers", "hysteria_port", "INTEGER")
         _ensure_column(conn, "servers", "sub_port", "INTEGER")
+        _ensure_column(conn, "servers", "warp_enabled", "BOOLEAN DEFAULT 0")
+        _ensure_column(conn, "servers", "warp_mode", "VARCHAR(16) DEFAULT 'sites'")
+        _ensure_column(conn, "servers", "warp_json", "TEXT DEFAULT ''")
+        _ensure_column(conn, "servers", "warp_wg_enc", "TEXT DEFAULT ''")
+        _ensure_column(conn, "servers", "protect_bittorrent", "BOOLEAN DEFAULT 0")
+        _ensure_column(conn, "servers", "protect_private", "BOOLEAN DEFAULT 0")
+        _ensure_column(conn, "servers", "protect_ads", "BOOLEAN DEFAULT 0")
     _Session = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
 
 

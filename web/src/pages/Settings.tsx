@@ -14,6 +14,7 @@ type Settings = {
   dns2: string;
   presets: { id: string; title: string; action: string; domains: number; cidrs: number }[];
   hysteria2: { enabled: boolean; reason: string };
+  ssh_via_entry: boolean;
 };
 
 type Source = {
@@ -72,6 +73,23 @@ export function SettingsPage() {
             </div>
             <p className="mt-3 text-xs text-mist">Эти адреса попадают в новые конфиги клиентов. Уже выданный файл на телефоне не меняется, пока его не скачают снова.</p>
             <button className="mt-3 rounded-lg bg-tide px-4 py-2" onClick={() => api("/api/settings/dns", { method: "PUT", body: JSON.stringify(dns) }).then(() => setMessage("DNS сохранён"))}>Сохранить DNS</button>
+            <label className="mt-5 flex items-start gap-3 rounded-xl border border-line px-3 py-3 text-sm">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={Boolean(data.ssh_via_entry)}
+                onChange={(e) => {
+                  const enabled = e.target.checked;
+                  void api("/api/settings/ssh-via-entry", { method: "PUT", body: JSON.stringify({ enabled }) })
+                    .then(() => { setData({ ...data, ssh_via_entry: enabled }); setMessage(enabled ? "SSH к выходам пойдёт через входной узел" : "SSH снова идёт напрямую"); })
+                    .catch((err: Error) => setError(err.message));
+                }}
+              />
+              <span>
+                <span className="font-medium">SSH к выходам через входной узел</span>
+                <span className="mt-1 block text-xs text-mist">Панель подключается к транзитным и выходным серверам через вход. Их хостер не видит адрес вашего компьютера. Если вход недоступен, подключение к выходам не откроется. По умолчанию выключено.</span>
+              </span>
+            </label>
             {data.demo && (
               <button className="mt-3 block text-sm text-rose" onClick={() => api("/api/settings/clear-demo", { method: "POST" }).then(() => { setMessage("Демо-данные удалены"); void load(); })}>
                 Удалить демо-данные

@@ -1,17 +1,26 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { api, flag, Overview, roleLabel } from "../api";
+import { heroineSrc } from "../heroine";
+import { FlowDiagram, FlowData } from "./FlowDiagram";
 
 export function OverviewPage() {
   const [data, setData] = useState<Overview | null>(null);
+  const [flow, setFlow] = useState<FlowData | null>(null);
   const [error, setError] = useState("");
+  const navigate = useNavigate();
 
   useEffect(() => {
     let stop = false;
     async function load() {
       try {
         const next = await api<Overview>("/api/overview");
-        if (!stop) setData(next);
+        const scheme = await api<FlowData>("/api/flow");
+        if (!stop) {
+          setData(next);
+          setFlow(scheme);
+        }
       } catch (err) {
         if (!stop) setError(err instanceof Error ? err.message : "ошибка");
       }
@@ -46,6 +55,7 @@ export function OverviewPage() {
 
   return (
     <Page title="Топология каскада" subtitle={data.demo ? "Демонстрационные адреса, ключи локальные" : "Живая схема"}>
+      {flow && <div className="mb-4"><FlowDiagram data={flow} onSelect={(id) => navigate(`/servers?node=${id}`)} /></div>}
       <div className="grid gap-4 xl:grid-cols-[220px_280px_1fr]">
         <div className="flex flex-col gap-3">
           {kinds.map(([kind, title]) => {
@@ -62,7 +72,9 @@ export function OverviewPage() {
           })}
         </div>
         <div className="flex flex-col gap-3">
-          <div className="card p-4 shadow-glow">
+          <div className="card relative overflow-hidden p-4 shadow-glow">
+            <img src={data.entry.heroine || heroineSrc(data.entry.country)} alt="" className="heroine-cut pointer-events-none absolute bottom-0 right-0 h-36 w-24 opacity-90" />
+            <div className="relative pr-20">
             <div className="text-xs uppercase tracking-wider text-teal">Вход</div>
             <div className="mt-1 flex items-center justify-between">
               <div className="text-lg font-semibold">{data.entry.name}</div>
@@ -72,6 +84,7 @@ export function OverviewPage() {
             <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
               <Metric label="CPU" value={data.entry.cpu != null ? `${data.entry.cpu}%` : "—"} />
               <Metric label="Скорость" value={data.speed_mbps ? `${data.speed_mbps} Мбит/с` : "—"} />
+            </div>
             </div>
           </div>
           <div className="card border-dashed px-4 py-3 text-sm text-mist">
@@ -92,7 +105,8 @@ export function OverviewPage() {
             <div className="mt-3 flex flex-col gap-2">
               {data.exits.map((exit) => (
                 <div key={exit.id} className="flex items-center justify-between rounded-xl bg-black/20 px-3 py-2">
-                  <div>
+                  <img src={exit.heroine || heroineSrc(exit.country)} alt="" className="heroine-cut mr-2 h-10 w-8" />
+                  <div className="min-w-0 flex-1">
                     <div className="text-sm">{flag[exit.country] || ""} {exit.name}</div>
                     <div className="text-xs text-mist">{roleLabel[exit.role]} · {exit.ping_ms != null ? `${exit.ping_ms} мс` : "нет пинга"}</div>
                   </div>

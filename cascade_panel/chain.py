@@ -83,7 +83,7 @@ def build_chain(
             host=node["host"],
             awg_port=None,
             reality_port=mat.port,
-            xray=exit_config(inbound=mat, inbound_users=users),
+            xray=exit_config(inbound=mat, inbound_users=users, protections=node.get("protections"), warp=node.get("warp")),
         )
         if node["role"] != "exit":
             continue

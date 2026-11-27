@@ -68,7 +68,7 @@ type Source = {
 
 type Preset = { id: string; title: string; enabled?: boolean; domains: number; cidrs: number };
 type Detect = { enabled: boolean; status: string; last_run: string };
-type Tab = "rules" | "addresses" | "sources" | "detect";
+type Tab = "rules" | "addresses" | "warp" | "sources" | "detect";
 
 const emptyRule = {
   id: "",
@@ -193,6 +193,7 @@ export function RoutingPage() {
   const tabs: [Tab, string][] = [
     ["rules", "Правила"],
     ["addresses", "Списки адресов"],
+    ["warp", "Список WARP"],
     ["sources", "Источники"],
     ["detect", "Автоопределение"],
   ];
@@ -217,6 +218,7 @@ export function RoutingPage() {
           </button>
         ))}
       </div>
+      <RouteTest onError={setError} />
       {!rules && <Banner text="Загрузка правил…" />}
       {rules && tab === "rules" && (
         <div className="grid gap-4 xl:grid-cols-[1fr_320px]">
@@ -276,6 +278,7 @@ export function RoutingPage() {
       {rules && tab === "addresses" && (
         <AddressesTab addresses={addresses} presets={presets} onChange={load} onError={setError} />
       )}
+      {rules && tab === "warp" && <WarpSitesTab onError={setError} />}
       {rules && tab === "sources" && <SourcesTab sources={sources} onChange={load} onError={setError} />}
       {rules && tab === "detect" && (
         <DetectTab detect={detect} probeDomain={probeDomain} setProbeDomain={setProbeDomain} onChange={load} onError={setError} />
@@ -467,12 +470,13 @@ function SourcesTab({ sources, onChange, onError }: { sources: Source[]; onChang
             <option value="domain">Список доменов</option>
             <option value="cidr">Список сетей</option>
             <option value="geosite-dat">Файл geosite.dat</option>
+            <option value="geoip-dat">Файл geoip.dat</option>
           </select>
         </label>
         <label className="text-xs text-mist">Обновлять каждые, часов
           <input type="number" min={1} className="mt-1 w-full rounded-lg border border-line bg-ink px-3 py-2" value={draft.interval_hours} onChange={(e) => setDraft({ ...draft, interval_hours: Number(e.target.value) })} />
         </label>
-        {draft.kind === "geosite-dat" && (
+        {draft.kind === "geosite-dat" || draft.kind === "geoip-dat" && (
           <label className="text-xs text-mist md:col-span-2">Категория внутри geosite.dat
             <input className="mt-1 w-full rounded-lg border border-line bg-ink px-3 py-2" value={draft.selector} onChange={(e) => setDraft({ ...draft, selector: e.target.value })} placeholder="RU" />
           </label>
@@ -548,3 +552,104 @@ function ruleToForm(rule: Rule): typeof emptyRule {
     group_id: rule.group_id || "",
   };
 }
+
+
+function RouteTest({ onError }: { onError: (value: string) => void }) {
+  const [query, setQuery] = useState("");
+  const [result, setResult] = useState<{ label?: string; action?: string; exit_name?: string; outbound?: string; reason?: string; warp?: { used: boolean; mode: string; egress_ip: string } | null } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function run(event: FormEvent) {
+    event.preventDefault();
+    const raw = query.trim();
+    if (!raw) return;
+    setBusy(true);
+    setResult(null);
+    const isIp = /^[0-9a-fA-F:.]+$/.test(raw) || raw.includes("/");
+    const params = new URLSearchParams(isIp ? { ip: raw } : { host: raw });
+    try {
+      const body = await api<typeof result>(`/api/route/decide?${params.toString()}`, { method: "POST" });
+      setResult(body);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "ошибка");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card mb-4 p-4">
+      <h2 className="font-semibold">Тест маршрута</h2>
+      <p className="mt-1 text-xs text-mist">Введите сайт или IP — панель покажет, через какой выход он пойдёт по текущим правилам, и затронет ли его WARP.</p>
+      <form className="mt-3 flex flex-wrap gap-2" onSubmit={run}>
+        <input className="min-w-[220px] flex-1 rounded-lg border border-line bg-ink px-3 py-2 text-sm" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="chatgpt.com или 8.8.8.8" />
+        <button className="rounded-lg bg-tide px-4 py-2 text-sm" disabled={busy}>{busy ? "Проверяю…" : "Проверить"}</button>
+      </form>
+      {result && (
+        <div className="mt-3 rounded-xl border border-line px-3 py-2 text-sm">
+          <div className="font-medium">{result.label || result.reason}</div>
+          <div className="mt-1 text-xs text-mist">
+            Действие: {result.action}
+            {result.exit_name ? ` · выход ${result.exit_name}` : ""}
+            {result.outbound ? ` · ${result.outbound}` : ""}
+            {result.warp?.used ? ` · через WARP (${result.warp.mode === "all" ? "весь трафик" : "выбранные сайты"}${result.warp.egress_ip ? `, ${result.warp.egress_ip}` : ""})` : ""}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function WarpSitesTab({ onError }: { onError: (value: string) => void }) {
+  const [rows, setRows] = useState<Address[]>([]);
+  const [value, setValue] = useState("");
+  const [editId, setEditId] = useState<string | null>(null);
+
+  async function load() {
+    setRows(await api<Address[]>("/api/warp/sites"));
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    try {
+      if (editId) {
+        await api(`/api/warp/sites/${editId}`, { method: "PATCH", body: JSON.stringify({ value }) });
+        setEditId(null);
+      } else {
+        await api("/api/warp/sites", { method: "POST", body: JSON.stringify({ value }) });
+      }
+      setValue("");
+      await load();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "ошибка");
+    }
+  }
+
+  return (
+    <section className="card p-4">
+      <Help title="Что идёт через WARP" text="Этот список действует на выходных узлах в режиме «только выбранные сайты». Можно добавить домен, сеть, geosite:openai или geoip:google. Закреплённая запись не затирается при следующих правках, исключённая больше не попадает в конфиг Xray. После сохранения панель обновляет конфиг выходов." />
+      <form className="mb-3 flex flex-wrap gap-2" onSubmit={save}>
+        <input className="min-w-[240px] flex-1 rounded-lg border border-line bg-ink px-3 py-2 text-sm" value={value} onChange={(e) => setValue(e.target.value)} placeholder="geosite:openai, gemini.google.com или 1.1.1.1/32" required />
+        <button className="rounded-lg bg-tide px-3 py-2 text-sm">{editId ? "Сохранить" : "Добавить"}</button>
+        {editId && <button type="button" className="rounded-lg border border-line px-3 py-2 text-sm" onClick={() => { setEditId(null); setValue(""); }}>отмена</button>}
+      </form>
+      {rows.length === 0 && <p className="text-sm text-mist">Список пуст. Добавьте сайт или категорию, которую нужно выпускать через Cloudflare WARP.</p>}
+      <div className="flex max-h-[520px] flex-col gap-2 overflow-auto">
+        {rows.map((row) => (
+          <div key={row.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line px-3 py-2 text-xs">
+            <span className={row.excluded ? "text-mist line-through" : ""}>{row.kind}:{row.value}</span>
+            <span className="text-mist">{row.source} · {row.source_date.slice(0, 10)}</span>
+            <span className="flex flex-wrap gap-2">
+              <button className="text-teal" onClick={() => { setEditId(row.id); setValue(row.kind === "domain" || row.kind === "cidr" ? row.value : `${row.kind}:${row.value}`); }}>изменить</button>
+              <button className="text-teal" onClick={() => void api(`/api/addresses/${row.id}/pin`, { method: "POST" }).then(load)}>{row.pinned ? "открепить" : "закрепить"}</button>
+              <button className="text-amber" onClick={() => void api(`/api/addresses/${row.id}/exclude`, { method: "POST" }).then(load)}>{row.excluded ? "вернуть" : "исключить"}</button>
+              <button className="text-rose" onClick={() => { if (confirm(`Удалить ${row.value}?`)) void api(`/api/addresses/${row.id}`, { method: "DELETE" }).then(load); }}>удалить</button>
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+

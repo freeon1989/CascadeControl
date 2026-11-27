@@ -210,6 +210,26 @@ class AddressIn(BaseModel):
     action: str = "cascade"
 
 
+class ToggleIn(BaseModel):
+    enabled: bool = False
+
+
+class WarpIn(BaseModel):
+    enabled: bool
+    mode: str = "sites"
+
+
+class ProtectIn(BaseModel):
+    bittorrent: bool | None = None
+    private: bool | None = None
+    ads: bool | None = None
+
+
+class WarpSiteIn(BaseModel):
+    value: str
+    pinned: bool = False
+
+
 class DetectToggle(BaseModel):
     enabled: bool
 
@@ -289,8 +309,10 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
         if (do_seed if do_seed is not None else seed_enabled()):
             seed_if_empty(db)
         from .editor import migrate_geo_rules
+        from .options import ensure_defaults
 
         migrate_geo_rules(db)
+        ensure_defaults(db)
 
     @app.get("/api/health")
     def health() -> dict:
@@ -933,16 +955,25 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
             if row is None:
                 raise HTTPException(404, "запись не найдена")
             row.pinned = not row.pinned
-            return {"pinned": row.pinned}
+            if row.source == "warp":
+                from .options import touch_warp_exits
+
+                touch_warp_exits(db)
+            return {"pinned": row.pinned, "id": row.id}
 
     @app.post("/api/addresses/{entry_id}/exclude")
     def exclude_address(entry_id: str) -> dict:
+        from .options import touch_warp_exits
+        from .service import reconfigure_worker, start_job
+
         with session() as db:
             row = db.get(AddressEntry, entry_id)
             if row is None:
                 raise HTTPException(404, "запись не найдена")
             row.excluded = not row.excluded
-            return {"excluded": row.excluded}
+            dirty = touch_warp_exits(db) if row.source == "warp" else []
+        jobs = [start_job("reconfigure", sid, reconfigure_worker) for sid in dirty]
+        return {"excluded": row.excluded, "id": row.id, "job_ids": jobs}
 
     @app.get("/api/sources")
     def get_sources() -> list:
@@ -968,8 +999,8 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
     @app.post("/api/sources")
     def post_source(body: SourceIn) -> dict:
         kind = body.kind
-        if kind not in {"domain", "cidr", "geosite-dat"}:
-            raise HTTPException(400, "тип списка: domain, cidr или geosite-dat")
+        if kind not in {"domain", "cidr", "geosite-dat", "geoip-dat"}:
+            raise HTTPException(400, "тип списка: domain, cidr, geosite-dat или geoip-dat")
         if not body.url.startswith("http://") and not body.url.startswith("https://"):
             raise HTTPException(400, "нужен http(s) адрес списка")
         with session() as db:
@@ -996,7 +1027,7 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
                 raise HTTPException(404, "источник не найден")
             row.title = body.title.strip() or row.title
             row.url = body.url.strip() or row.url
-            if body.kind in {"domain", "cidr", "geosite-dat"}:
+            if body.kind in {"domain", "cidr", "geosite-dat", "geoip-dat"}:
                 row.kind = body.kind
             if body.action in {"direct", "cascade", "block"}:
                 row.action = body.action
@@ -1027,24 +1058,43 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
 
                 values = parse_cidr_list(body.value)
                 kind = "cidr"
+            elif body.kind in {"geosite", "geoip"}:
+                from .warp import parse_warp_entry
+
+                prefix = "geosite:" if body.kind == "geosite" else "geoip:"
+                raw = body.value if body.value.startswith(prefix) else prefix + body.value
+                kind, value = parse_warp_entry(raw)
+                values = [value]
             else:
-                raise HTTPException(400, "тип: domain или cidr")
+                raise HTTPException(400, "тип: domain, cidr, geosite или geoip")
             if len(values) != 1:
-                raise HTTPException(400, "нужен один домен или одна сеть")
-            action = body.action if body.action in {"direct", "cascade", "block"} else "cascade"
-            row = upsert_address(db, kind, values[0], action, "manual")
+                raise HTTPException(400, "нужен один домен, сеть или категория")
+            source = "manual"
+            action = body.action if body.action in {"direct", "cascade", "block", "warp"} else "cascade"
+            if action == "warp":
+                from .options import add_warp_site, site_view
+
+                row = add_warp_site(db, f"{kind}:{values[0]}" if kind in {"geosite", "geoip"} else values[0])
+                return site_view(row)
+            row = upsert_address(db, kind, values[0], action, source)
             if row is None:
                 raise HTTPException(400, "адрес в списке исключений")
-            return {"id": row.id, "value": row.value, "source": row.source, "source_date": row.source_date}
+            return {"id": row.id, "value": row.value, "source": row.source, "source_date": row.source_date, "kind": row.kind, "action": row.action}
 
     @app.delete("/api/addresses/{entry_id}")
     def delete_address(entry_id: str) -> dict:
+        from .options import WARP_SOURCE, touch_warp_exits
+        from .service import reconfigure_worker, start_job
+
         with session() as db:
             row = db.get(AddressEntry, entry_id)
             if row is None:
                 raise HTTPException(404, "адрес не найден")
+            warp = row.source == "warp"
             db.delete(row)
-        return {"ok": True}
+            dirty = touch_warp_exits(db) if warp else []
+        jobs = [start_job("reconfigure", sid, reconfigure_worker) for sid in dirty]
+        return {"ok": True, "job_ids": jobs}
 
     @app.post("/api/sources/{source_id}/refresh")
     def post_refresh(source_id: str) -> dict:
@@ -1108,6 +1158,87 @@ def create_app(database: Path | None = None, do_seed: bool | None = None) -> Fas
         probe = Probe(body.probe_status, "") if body.probe_status else classify_body(body.status_code, body.body)
         with session() as db:
             return record_detection(db, body.domain.strip(), probe)
+
+    @app.put("/api/settings/ssh-via-entry")
+    def put_ssh_via_entry(body: ToggleIn) -> dict:
+        with session() as db:
+            from .options import set_ssh_via_entry
+
+            return set_ssh_via_entry(db, body.enabled)
+
+    @app.post("/api/servers/{server_id}/warp")
+    def post_warp(server_id: str, body: WarpIn) -> dict:
+        from .options import start_warp_job
+
+        try:
+            job_id = start_warp_job(server_id, body.enabled, body.mode)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"job_id": job_id}
+
+    @app.put("/api/servers/{server_id}/protect")
+    def put_protect(server_id: str, body: ProtectIn) -> dict:
+        from .options import set_protections
+        from .service import server_view, start_job, reconfigure_worker
+
+        try:
+            with session() as db:
+                server = db.get(Server, server_id)
+                if server is None:
+                    raise HTTPException(404, "узел не найден")
+                set_protections(db, server, body.model_dump(exclude_unset=True))
+                view = server_view(server)
+                ready = (not server.demo) and bool(server.precheck_json)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        job_id = start_job("reconfigure", server_id, reconfigure_worker) if ready else None
+        return {"server": view, "job_id": job_id}
+
+    @app.get("/api/warp/sites")
+    def get_warp_sites() -> list:
+        from .options import site_view, warp_site_rows
+
+        with session() as db:
+            return [site_view(row) for row in warp_site_rows(db)]
+
+    @app.post("/api/warp/sites")
+    def post_warp_site(body: WarpSiteIn) -> dict:
+        from .options import add_warp_site, site_view, touch_warp_exits
+        from .service import start_job, reconfigure_worker
+
+        try:
+            with session() as db:
+                row = add_warp_site(db, body.value, pinned=body.pinned)
+                view = site_view(row)
+                dirty = touch_warp_exits(db)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        jobs = [start_job("reconfigure", sid, reconfigure_worker) for sid in dirty]
+        return {**view, "job_ids": jobs}
+
+    @app.patch("/api/warp/sites/{entry_id}")
+    def patch_warp_site(entry_id: str, body: WarpSiteIn) -> dict:
+        from .options import site_view, touch_warp_exits, update_warp_site
+        from .service import start_job, reconfigure_worker
+
+        try:
+            with session() as db:
+                row = update_warp_site(db, entry_id, body.value)
+                if body.pinned:
+                    row.pinned = True
+                view = site_view(row)
+                dirty = touch_warp_exits(db)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        jobs = [start_job("reconfigure", sid, reconfigure_worker) for sid in dirty]
+        return {**view, "job_ids": jobs}
+
+    @app.get("/api/flow")
+    def get_flow() -> dict:
+        from .options import flow_view
+
+        with session() as db:
+            return flow_view(db)
 
     @app.get("/api/settings")
     def get_settings() -> dict:

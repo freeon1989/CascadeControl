@@ -1,7 +1,9 @@
 import { FormEvent, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, Check, flag, roleLabel, Server } from "../api";
+import { heroineSrc } from "../heroine";
 import { saveDownload } from "../saveFile";
-import { Banner, Page, Spark } from "./Overview";
+import { Banner, Page } from "./Overview";
 
 const roles = [
   ["entry", "Вход"],
@@ -18,6 +20,7 @@ export function ServersPage() {
   const [editId, setEditId] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
   const [busy, setBusy] = useState("");
+  const [params] = useSearchParams();
 
   async function load() {
     try {
@@ -30,9 +33,11 @@ export function ServersPage() {
 
   useEffect(() => {
     void load();
+    const node = params.get("node");
+    if (node) setEditId(node);
     const timer = window.setInterval(() => void load(), 15000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [params]);
 
   async function refreshStatus(id: string) {
     setError("");
@@ -77,82 +82,102 @@ export function ServersPage() {
     }
   }
 
+  async function setWarp(row: Server, enabled: boolean, mode: string) {
+    setBusy(row.id + "warp");
+    try {
+      const job = await api<{ job_id: string }>(`/api/servers/${row.id}/warp`, { method: "POST", body: JSON.stringify({ enabled, mode }) });
+      const result = await waitJob(job.job_id);
+      if (!result.ok) setError(result.lines[result.lines.length - 1] || "не удалось настроить WARP");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ошибка");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function setProtect(row: Server, patch: Record<string, boolean>) {
+    setBusy(row.id + "protect");
+    try {
+      const result = await api<{ job_id: string | null }>(`/api/servers/${row.id}/protect`, { method: "PUT", body: JSON.stringify(patch) });
+      if (result.job_id) {
+        const job = await waitJob(result.job_id);
+        if (!job.ok) setError(job.lines[job.lines.length - 1] || "не удалось обновить защиту");
+      }
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ошибка");
+    } finally {
+      setBusy("");
+    }
+  }
+
   return (
     <Page
       title="Серверы"
-      subtitle="Управление серверами каскада VPN"
+      subtitle="У каждого узла — героиня его страны, как в мониторе. WARP и защита выхода включаются отдельно, по умолчанию выключены."
       extra={<button className="rounded-full bg-iris px-4 py-2 text-sm font-semibold" onClick={() => setOpen(true)}>+ Добавить сервер</button>}
     >
       {error && <Banner text={error} />}
       {!rows && <Banner text="Загрузка серверов…" />}
       {rows && rows.length === 0 && <Banner text="Серверов нет. Добавьте первый — панель проверит KVM, систему и свободные порты." />}
       {rows && rows.length > 0 && (
-        <div className="card overflow-x-auto">
-          <table className="w-full min-w-[1100px] text-left text-sm">
-            <thead className="text-xs uppercase text-mist">
-              <tr>
-                {["Имя", "IP", "Роль", "Страна", "Протоколы", "CPU", "RAM", "Пинг", "Статус", ""].map((h) => (
-                  <th key={h} className="px-3 py-3 font-medium">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.id} className="border-t border-line/70">
-                  <td className="px-3 py-3">
-                    <div className="font-medium">{row.name}</div>
+        <div className="mb-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {rows.map((row) => (
+            <article key={row.id} className="card relative overflow-hidden p-4">
+              <img src={row.heroine || heroineSrc(row.country)} alt="" className="heroine-cut absolute bottom-0 right-2 h-40 w-24 opacity-95" />
+              <div className="relative pr-24">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="text-lg font-semibold">{row.name}</div>
                     <div className="text-xs text-mist">{roleLabel[row.role]}{row.demo ? " · демо" : ""}{row.config_dirty ? " · не отправлено" : ""}</div>
-                    {(row.uptime || row.disk) && <div className="text-xs text-mist">{[row.uptime && `аптайм ${row.uptime}`, row.disk && `диск ${row.disk}`].filter(Boolean).join(" · ")}</div>}
-                  </td>
-                  <td className="px-3 py-3 font-mono text-xs">{row.host}</td>
-                  <td className="px-3 py-3"><span className="rounded-full bg-white/5 px-2 py-1 text-xs">{roleLabel[row.role]}</span></td>
-                  <td className="px-3 py-3">{flag[row.country] || "—"} {row.country}</td>
-                  <td className="px-3 py-3">
-                    <div className="flex flex-wrap gap-1">
-                      {row.protocols.map((item) => (
-                        <span key={item} className="rounded-md bg-iris/20 px-2 py-0.5 text-xs text-iris">{item}</span>
-                      ))}
-                      <span className="rounded-md bg-white/5 px-2 py-0.5 text-xs text-mist">Hysteria2 выкл</span>
-                    </div>
-                    <ProtocolLive live={row.live} agentUpdate={row.agent_update} />
-                  </td>
-                  <td className="px-3 py-3">
-                    <div>{row.cpu != null ? `${row.cpu}%` : "—"}</div>
-                    <Spark series={row.spark || []} color="#2ee6c7" />
-                  </td>
-                  <td className="whitespace-nowrap px-3 py-3">{row.ram || "—"}</td>
-                  <td className="px-3 py-3 text-ok">{row.ping_ms != null ? `${row.ping_ms} мс` : "—"}</td>
-                  <td className="px-3 py-3">
-                    <button type="button" className="text-left" onClick={() => setReportId(row.id)}>
-                      <span className="inline-flex items-center gap-1">
-                        <span className={`inline-block h-2 w-2 rounded-full ${row.status === "online" ? "bg-ok" : row.status === "offline" || row.status === "error" ? "bg-rose" : "bg-mist"}`} />
-                        <span className={row.status === "online" ? "text-ok" : row.status === "offline" || row.status === "error" ? "text-rose" : "text-mist"}>
-                          {row.status === "online" ? "Онлайн" : row.status === "offline" ? "Офлайн" : row.status === "error" ? "Ошибка" : "Не проверен"}
-                        </span>
+                  </div>
+                  <span className={row.status === "online" ? "text-xs text-ok" : row.status === "offline" || row.status === "error" ? "text-xs text-rose" : "text-xs text-mist"}>
+                    {row.status === "online" ? "Онлайн" : row.status === "offline" ? "Офлайн" : row.status === "error" ? "Ошибка" : "Не проверен"}
+                  </span>
+                </div>
+                <div className="mt-1 font-mono text-xs text-mist">{flag[row.country] || ""} {row.country || "—"} · {row.host}</div>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {row.protocols.map((item) => (
+                    <span key={item} className="rounded-md bg-iris/20 px-2 py-0.5 text-xs text-iris">{item}</span>
+                  ))}
+                </div>
+                <div className="mt-2 text-xs text-mist">{row.cpu != null ? `CPU ${row.cpu}%` : "CPU —"} · {row.ram || "RAM —"} · {row.ping_ms != null ? `${row.ping_ms} мс` : "нет пинга"}</div>
+                {(row.role === "exit" || row.role === "standby_exit") && (
+                  <div className="mt-3 space-y-2 rounded-xl border border-line p-2 text-xs">
+                    <label className="flex items-start gap-2">
+                      <input type="checkbox" disabled={busy !== "" || row.demo} checked={Boolean(row.warp?.enabled)} onChange={(e) => void setWarp(row, e.target.checked, row.warp?.mode || "sites")} />
+                      <span>
+                        <span className="font-medium">Выход через Cloudflare WARP</span>
+                        <span className="mt-0.5 block text-mist">По умолчанию выключено. Некоторые сайты режут адреса Cloudflare, появится небольшая задержка.</span>
                       </span>
-                      {row.checked_at && <div className="text-xs text-mist">проверка {checkedLabel(row.checked_at)}</div>}
-                      {row.last_error && <div className="max-w-[220px] text-xs text-rose underline decoration-rose/40">{row.last_error}</div>}
-                      {!row.last_error && <div className="text-xs text-mist underline decoration-white/20">отчёт проверки</div>}
-                    </button>
-                  </td>
-                  <td className="px-3 py-3">
-                    <div className="flex max-w-[280px] flex-wrap gap-1">
-                      <Mini disabled={busy !== ""} onClick={() => void refreshStatus(row.id)}>Статус</Mini>
-                      <Mini disabled={busy !== ""} onClick={() => setEditId(row.id)}>Изменить</Mini>
-                      <Mini disabled={busy !== ""} onClick={() => act(row.id, "precheck")}>Перепроверить</Mini>
-                      <Mini disabled={busy !== ""} onClick={() => act(row.id, "reconfigure")}>Перенастроить</Mini>
-                      <Mini disabled={busy !== ""} onClick={() => act(row.id, "update")}>Обновить</Mini>
-                      {row.agent_update?.outdated && (
-                        <Mini disabled={busy !== ""} onClick={() => act(row.id, "agent-update")}>Обновить агент</Mini>
-                      )}
-                      <Mini disabled={busy !== ""} onClick={() => act(row.id, "reinstall")}>Переустановить</Mini>
-                      <Mini disabled={busy !== ""} onClick={() => act(row.id, "remove")}>Удалить</Mini>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    </label>
+                    {row.warp?.enabled && (
+                      <div className="ml-5 space-y-1">
+                        <label className="flex items-center gap-2"><input type="radio" name={`warp-mode-${row.id}`} checked={(row.warp?.mode || "sites") === "sites"} onChange={() => void setWarp(row, true, "sites")} /> Только выбранные сайты</label>
+                        <label className="flex items-center gap-2"><input type="radio" name={`warp-mode-${row.id}`} checked={row.warp?.mode === "all"} onChange={() => void setWarp(row, true, "all")} /> Весь трафик выхода</label>
+                        <div className="text-mist">{row.warp.status}{row.warp.egress_ip ? ` · ${row.warp.egress_ip}` : ""}{row.warp.masque ? ` · ${row.warp.masque}` : ""}</div>
+                        {row.warp.error && <div className="text-rose">{row.warp.error}</div>}
+                      </div>
+                    )}
+                    <label className="flex items-center gap-2"><input type="checkbox" disabled={busy !== "" || row.demo} checked={Boolean(row.protect?.bittorrent)} onChange={(e) => void setProtect(row, { bittorrent: e.target.checked })} /> Блокировать торренты</label>
+                    <label className="flex items-center gap-2"><input type="checkbox" disabled={busy !== "" || row.demo} checked={Boolean(row.protect?.private)} onChange={(e) => void setProtect(row, { private: e.target.checked })} /> Закрыть локальную сеть сервера</label>
+                    <label className="flex items-center gap-2"><input type="checkbox" disabled={busy !== "" || row.demo} checked={Boolean(row.protect?.ads)} onChange={(e) => void setProtect(row, { ads: e.target.checked })} /> Резать рекламу</label>
+                  </div>
+                )}
+                <div className="mt-3 flex max-w-[220px] flex-wrap gap-1">
+                  <Mini disabled={busy !== ""} onClick={() => void refreshStatus(row.id)}>Статус</Mini>
+                  <Mini disabled={busy !== ""} onClick={() => setEditId(row.id)}>Изменить</Mini>
+                  <Mini disabled={busy !== ""} onClick={() => act(row.id, "precheck")}>Перепроверить</Mini>
+                  <Mini disabled={busy !== ""} onClick={() => act(row.id, "reconfigure")}>Перенастроить</Mini>
+                  <Mini disabled={busy !== ""} onClick={() => act(row.id, "update")}>Обновить</Mini>
+                  {row.agent_update?.outdated && <Mini disabled={busy !== ""} onClick={() => act(row.id, "agent-update")}>Обновить агент</Mini>}
+                  <Mini disabled={busy !== ""} onClick={() => act(row.id, "reinstall")}>Переустановить</Mini>
+                  <Mini disabled={busy !== ""} onClick={() => act(row.id, "remove")}>Удалить</Mini>
+                </div>
+              </div>
+            </article>
+          ))}
         </div>
       )}
       {open && <AddServer onClose={() => { setOpen(false); void load(); }} />}
@@ -172,33 +197,6 @@ export function ServersPage() {
       )}
     </Page>
   );
-}
-
-function ProtocolLive({ live, agentUpdate }: { live?: Server["live"]; agentUpdate?: Server["agent_update"] }) {
-  if (!live) return null;
-  const bits: string[] = [];
-  if (live.awg) bits.push(`AWG: ${live.awg.handshakes} рукопожатий`);
-  if (live.xray === "active") bits.push("Xray: активен");
-  else if (live.xray && live.xray !== "missing") bits.push("Xray: нет");
-  if (live.agent === "active") bits.push(live.agent_version ? `агент ${live.agent_version}: работает` : "агент: работает");
-  if (live.docker === "active") bits.push("Docker: работает");
-  if (!bits.length && !agentUpdate?.outdated) return null;
-  return (
-    <div className="mt-1 text-[11px] text-mist">
-      {bits.join(" · ")}
-      {agentUpdate?.outdated && (
-        <div className="text-amber-300">
-          Агент {agentUpdate.known ? agentUpdate.agent : "старой версии"} старше панели {agentUpdate.panel}. Можно обновить кнопкой справа.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function checkedLabel(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
 }
 
 function Mini({ children, onClick, disabled }: { children: string; onClick: () => void; disabled?: boolean }) {

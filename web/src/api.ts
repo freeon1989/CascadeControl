@@ -66,7 +66,22 @@ export type Server = {
   config_dirty: boolean;
   last_error: string;
   precheck: { ok: boolean; checks: Check[] } | null;
+  heroine?: string;
+  warp?: WarpStatus | null;
+  protect?: { bittorrent: boolean; private: boolean; ads: boolean } | null;
 };
+
+export type WarpStatus = {
+  enabled: boolean;
+  connected: boolean;
+  mode: string;
+  egress_ip: string;
+  direct_ip?: string;
+  status: string;
+  error: string;
+  masque?: string;
+};
+
 
 export type Check = { id: string; title: string; ok: boolean; level: string; detail: string; hint?: string };
 
@@ -168,6 +183,12 @@ export const flag: Record<string, string> = {
   DE: "🇩🇪",
   NL: "🇳🇱",
   FI: "🇫🇮",
+  AT: "🇦🇹",
+  US: "🇺🇸",
+  FR: "🇫🇷",
+  GB: "🇬🇧",
+  SE: "🇸🇪",
+  PL: "🇵🇱",
 };
 
 export function formatHits(value: number): string {

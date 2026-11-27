@@ -50,6 +50,13 @@ class Server(Base):
     agent_status_json: Mapped[str] = mapped_column(Text, default="")
     config_dirty: Mapped[bool] = mapped_column(Boolean, default=True)
     last_error: Mapped[str] = mapped_column(Text, default="")
+    warp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    warp_mode: Mapped[str] = mapped_column(String(16), default="sites")
+    warp_json: Mapped[str] = mapped_column(Text, default="")
+    warp_wg_enc: Mapped[str] = mapped_column(Text, default="")
+    protect_bittorrent: Mapped[bool] = mapped_column(Boolean, default=False)
+    protect_private: Mapped[bool] = mapped_column(Boolean, default=False)
+    protect_ads: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     clients: Mapped[list["Client"]] = relationship(back_populates="server")

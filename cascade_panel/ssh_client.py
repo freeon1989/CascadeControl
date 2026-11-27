@@ -21,54 +21,56 @@ class SSHTarget:
 
 
 class ParamikoSession:
-    def __init__(self, target: SSHTarget, timeout: float = 25.0) -> None:
+    def __init__(self, target: SSHTarget, timeout: float = 25.0, jump: SSHTarget | None = None) -> None:
         self.target = target
         self.timeout = timeout
+        self.jump = jump
         self._client = None
+        self._jump_client = None
 
     def __enter__(self) -> "ParamikoSession":
-        import paramiko
-
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        kwargs = {
-            "hostname": self.target.host,
-            "port": self.target.port,
-            "username": self.target.user,
-            "timeout": self.timeout,
-            "allow_agent": False,
-            "look_for_keys": False,
-            "banner_timeout": self.timeout,
-        }
-        kwargs["auth_timeout"] = self.timeout
+        sock = None
+        if self.jump is not None:
+            try:
+                self._jump_client = _connect_client(self.jump, self.timeout)
+                transport = self._jump_client.get_transport()
+                if transport is None or not transport.is_active():
+                    raise SSHError("SSH через входной узел недоступен: входной сервер не отвечает")
+                sock = transport.open_channel(
+                    "direct-tcpip",
+                    (self.target.host, int(self.target.port)),
+                    ("127.0.0.1", 0),
+                    timeout=self.timeout,
+                )
+            except SSHError:
+                self._close_jump()
+                raise
+            except Exception as exc:  # noqa: BLE001 — наружу короткое сообщение без секрета
+                self._close_jump()
+                raise SSHError("SSH через входной узел недоступен: входной сервер не отвечает") from exc
         try:
-            if self.target.auth_type == "key":
-                kwargs["pkey"] = _load_pkey(self.target.secret)
-                client.connect(**kwargs)
-            else:
-                client.connect(**kwargs, password=self.target.secret.strip())
-        except Exception as exc:  # noqa: BLE001 — наружу уходит короткое сообщение без секрета
-            auth_failed = exc.__class__.__name__ == "AuthenticationException"
-            if self.target.auth_type != "key" and auth_failed:
-                try:
-                    client.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    client = _connect_password_interactive(self.target, self.timeout)
-                except Exception as second:  # noqa: BLE001
-                    raise SSHError(
-                        f"SSH: не удалось подключиться к {self.target.host}: {second.__class__.__name__}"
-                    ) from second
-            else:
-                raise SSHError(f"SSH: не удалось подключиться к {self.target.host}: {exc.__class__.__name__}") from exc
-        self._client = client
+            self._client = _connect_client(self.target, self.timeout, sock=sock)
+        except Exception:
+            self._close_jump()
+            raise
         return self
 
     def __exit__(self, *_) -> None:
         if self._client is not None:
-            self._client.close()
+            try:
+                self._client.close()
+            except Exception:  # noqa: BLE001
+                pass
             self._client = None
+        self._close_jump()
+
+    def _close_jump(self) -> None:
+        if self._jump_client is not None:
+            try:
+                self._jump_client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._jump_client = None
 
     def run(self, command: str, on_line: Callable[[str], None]) -> int:
         if self._client is None:
@@ -151,14 +153,57 @@ def _repair_cp866(text: str) -> str:
     return text
 
 
-def _connect_password_interactive(target: SSHTarget, timeout: float):
+def _connect_client(target: SSHTarget, timeout: float, sock=None):
+    """Открывает SSH-клиент. sock — канал direct-tcpip через входной узел."""
+    import paramiko
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    kwargs = {
+        "hostname": target.host,
+        "port": target.port,
+        "username": target.user,
+        "timeout": timeout,
+        "allow_agent": False,
+        "look_for_keys": False,
+        "banner_timeout": timeout,
+        "auth_timeout": timeout,
+    }
+    if sock is not None:
+        kwargs["sock"] = sock
+    try:
+        if target.auth_type == "key":
+            kwargs["pkey"] = _load_pkey(target.secret)
+            client.connect(**kwargs)
+        else:
+            client.connect(**kwargs, password=target.secret.strip())
+    except Exception as exc:  # noqa: BLE001 — наружу уходит короткое сообщение без секрета
+        auth_failed = exc.__class__.__name__ == "AuthenticationException"
+        if target.auth_type != "key" and auth_failed:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                client = _connect_password_interactive(target, timeout, sock=sock)
+            except Exception as second:  # noqa: BLE001
+                raise SSHError(
+                    f"SSH: не удалось подключиться к {target.host}: {second.__class__.__name__}"
+                ) from second
+        else:
+            raise SSHError(f"SSH: не удалось подключиться к {target.host}: {exc.__class__.__name__}") from exc
+    return client
+
+
+def _connect_password_interactive(target: SSHTarget, timeout: float, sock=None):
     """Пароль через keyboard-interactive, если сервер не принимает auth password."""
     import socket
 
     import paramiko
 
     password = target.secret.strip()
-    sock = socket.create_connection((target.host, int(target.port)), timeout)
+    if sock is None:
+        sock = socket.create_connection((target.host, int(target.port)), timeout)
     transport = paramiko.Transport(sock)
     transport.banner_timeout = timeout
     try:
@@ -203,10 +248,21 @@ def _load_pkey(secret: str):
 class FakeSession:
     """Подмена SSH в тестах и в сухом прогоне."""
 
-    def __init__(self, precheck_output: str = "", fail_connect: bool = False, stats_output: str = "") -> None:
+    def __init__(
+        self,
+        precheck_output: str = "",
+        fail_connect: bool = False,
+        stats_output: str = "",
+        jump: SSHTarget | None = None,
+        warp_output: str = "",
+        fail_warp: bool = False,
+    ) -> None:
         self.precheck_output = precheck_output
         self.fail_connect = fail_connect
         self.stats_output = stats_output
+        self.jump = jump
+        self.warp_output = warp_output
+        self.fail_warp = fail_warp
         self.files: dict[str, bytes] = {}
         self.commands: list[str] = []
 
@@ -251,6 +307,28 @@ class FakeSession:
             return 0
         if command.startswith("sudo rm") or "remove.sh" in command:
             on_line("CASCADE_LOG удалены только контейнеры cascade-*")
+            return 0
+        if "warp/enable.sh" in command or "warp/disable.sh" in command:
+            if self.fail_warp:
+                on_line("CASCADE_ERR не удалось подключить Cloudflare WARP")
+                return 1
+            if self.warp_output:
+                for line in self.warp_output.splitlines():
+                    on_line(line)
+                return 0
+            if "warp/disable.sh" in command:
+                on_line("CASCADE_LOG WARP выключен")
+                on_line(
+                    'CASCADE_WARP_JSON {"enabled":false,"connected":false,"egress_ip":"","direct_ip":"","warp":"off","status":"выключен"}'
+                )
+            else:
+                on_line("CASCADE_LOG WARP включён, выход 203.0.113.50")
+                on_line(
+                    'CASCADE_WARP_JSON {"enabled":true,"connected":true,"egress_ip":"203.0.113.50","direct_ip":"203.0.113.10","warp":"on","status":"подключён"}'
+                )
+            return 0
+        if "warp-cli" in command and "status" in command:
+            on_line("Status update: Connected")
             return 0
         return 0
 

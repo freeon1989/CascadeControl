@@ -114,6 +114,7 @@ Install log: deploy steps with no passwords or keys in the text.
 - Rules: direct / cascade / a specific exit / block, weights and balancing strategies.
 - Agent: TCP ping, a failure threshold, a fallback exit, and updates to the Xray selector.
 - Panel updates from GitHub with a SHA-256 check and rollback, and an agent update on the entry after confirmation.
+- Optional Cloudflare WARP egress (all traffic or selected sites, with an editable list), SSH to exits via the entry node, exit protections (BitTorrent, private LAN, ads), runetfreedom geo lists, a route test, a live traffic diagram, and country heroines on node cards. All of these options are off by default.
 
 Tests on this machine cover the panel and the agent, the UI build and a local server. A production VPS was not brought up from here: installing on a real server needs your SSH.
 

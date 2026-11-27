@@ -1,3 +1,5 @@
+**[Русский](README.md)** · **[English](README.en.md)**
+
 # Cascade Control
 
 [![Скачать для Windows](https://img.shields.io/badge/%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C%20%D0%B4%D0%BB%D1%8F%20Windows-0078D4?style=for-the-badge)](https://github.com/freeon1989/CascadeControl/releases/latest/download/CascadeControl-windows-x64.zip)

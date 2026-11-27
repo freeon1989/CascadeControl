@@ -76,33 +76,29 @@ The panel installs AmneziaWG 3.1 (image `amneziavpn/amneziawg-go`) and Xray VLES
 
 The screenshots below use a demonstration topology. Addresses are fictional, nodes are marked as demo. No real server keys or addresses are on the screens.
 
-Overview of the topology: clients, the single entry, and the share of direct vs cascade traffic.
+Overview of the topology: a live traffic diagram (clients, the entry, a direct path for Russian sites, exits and optional WARP), with a country heroine on each node.
 
 ![Overview](docs/screenshots/01-overview.png)
 
-Cascade servers: roles, protocols and state.
+Cascade servers: country heroines, WARP and exit protections.
 
 ![Servers](docs/screenshots/02-servers.png)
 
-Adding a server: the connection step in the check and install wizard.
+An exit card: WARP and protection toggles, and a heroine picker.
 
-![Add server](docs/screenshots/03-add-server.png)
+![Node card](docs/screenshots/03-node-card.png)
 
-Routing: rule order and exit balancing.
+Routing: the route test and the editable WARP site list.
 
 ![Routing](docs/screenshots/04-routing.png)
 
-Address lists: feed sources and service presets.
+Settings, including SSH to the exits through the entry node.
 
-![Address lists](docs/screenshots/05-address-lists.png)
+![Settings](docs/screenshots/05-settings.png)
 
-Router config: the original AmneziaWG `.conf` tab and a QR code.
+The same diagram in the light theme.
 
-![Client config](docs/screenshots/06-clients-conf.png)
-
-Install log: deploy steps with no passwords or keys in the text.
-
-![Deploy log](docs/screenshots/07-deploy-log.png)
+![Light theme](docs/screenshots/06-overview-light.png)
 
 ## What this version can do
 
